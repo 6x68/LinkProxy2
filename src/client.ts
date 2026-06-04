@@ -1,9 +1,9 @@
-import EventEmitter from "node:events";
-import { Message } from "@bufbuild/protobuf";
+import { EventEmitter } from "node:events";
+import type { Message } from "@bufbuild/protobuf";
 import { decode } from "@msgpack/msgpack";
 import type { Socket } from "engine.io";
-import { CPacketDisconnect } from "../gen/protocol2_pb";
-import { encode } from "./parser";
+import { CPacketDisconnect } from "../gen/protocol2_pb.js";
+import { type EncodeOptions, encode } from "./parser/encoder.js";
 
 export interface ClientEvents {
 	data: [object];
@@ -17,37 +17,52 @@ export default class Client extends EventEmitter<ClientEvents> {
 	constructor(socket: Socket) {
 		super();
 		this.#socket = socket;
-		this.#socket.on("data", this.#onData.bind(this));
+		this.#socket.on("message", this.#onData.bind(this));
 		this.#socket.on("close", (a) => this.emit("close", a));
 	}
 	/** Handles data coming from the client. This is always MsgPack (Protobuf object -> object.toJSON -> MsgPack -> Sent), so we don't need anything else. */
 	#onData(
 		data:
 			| string
-			// | object
 			| ArrayLike<number>
 			| ArrayBufferLike
 			| ArrayBufferView<ArrayBufferLike>,
 	) {
 		if (typeof data === "string") {
-			this.disconnect("Plaintext data received");
+			// If it's a string connect packet "0", parse it as namespace connect
+			if (data === "0") {
+				this.emit("data", { t: 0, d: null, n: "/" });
+				return;
+			}
+			// Try to parse as JSON if possible, otherwise skip or disconnect
+			try {
+				const parsed = JSON.parse(data);
+				this.emit("data", parsed);
+			} catch {
+				this.disconnect("Invalid plaintext data received");
+			}
 			return;
 		}
-		// if (typeof data === "object" && !ArrayBuffer.isView(data)) {
-		// 	this.emit("data", data);
-		// 	return;
-		// }
-		const mp = decode(data);
+
+		let mp: object;
+		try {
+			mp = decode(data) as object;
+		} catch (_) {
+			this.disconnect("MessagePack decode error");
+			return;
+		}
+
 		if (typeof mp !== "object" || mp == null) {
 			this.disconnect(
 				"MessagePack data isn't an object (or is null/undefined)",
 			);
 			return;
 		}
+
 		this.emit("data", mp);
 	}
-	send(packet: object | Message) {
-		const pkt = encode(packet);
+	send(packet: object | Message, options?: EncodeOptions) {
+		const pkt = encode(packet, options);
 		this.#socket.send(Buffer.from(pkt.buffer, pkt.byteOffset, pkt.byteLength));
 		// this.#socket.send(packet instanceof Message ? packet.toBinary() : packet);
 	}

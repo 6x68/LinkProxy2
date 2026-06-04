@@ -1,5 +1,4 @@
-import type { Message } from "@bufbuild/protobuf";
-import type { GenMessage } from "@bufbuild/protobuf/codegenv2";
+import type { Message, PlainMessage } from "@bufbuild/protobuf";
 import {
 	ClientBoundCombined,
 	CPacketAnimation,
@@ -89,8 +88,8 @@ import {
 	SPacketUpdateSign,
 	SPacketUseEntity,
 	SPacketUseItem,
-} from "../../gen/protocol2_pb";
-import { CPacketChunkData } from "../../gen/protocol3_pb";
+} from "../../gen/protocol2_pb.js";
+import { CPacketChunkData } from "../../gen/protocol3_pb.js";
 
 export const CPACKET_MAP = {
 	CPacketAnimation,
@@ -153,7 +152,8 @@ export const CPACKET_MAP = {
 	CPacketServerMetadata,
 	CPacketTimeUpdate,
 	ClientBoundCombined,
-};
+} as const;
+
 export const SPACKET_MAP = {
 	SPacketAdminAction,
 	SPacketAnalytics,
@@ -184,24 +184,31 @@ export const SPACKET_MAP = {
 	SPacketRequestChunk,
 	SPacketUpdateInventory,
 	SPacketUseItem,
-};
+} as const;
+
+type AnyPacketMap = typeof CPACKET_MAP & typeof SPACKET_MAP;
 
 export const NAME_TO_ID: Record<string, number> = {};
-export const ID_TO_PACKET: Record<string, typeof Message> = {};
-export const ID_TO_NAME: Record<number, string> = {};
+export const ID_TO_PACKET: Record<string, PlainMessage<Message>> = {};
+export const ID_TO_NAME: Record<number, keyof AnyPacketMap> = {};
+
+function fixedEntries<K extends string | number | symbol, V>(
+	x: Record<K, V>,
+): [K, V][] {
+	return Object.entries(x) as [K, V][]; // holy who wrote these typings LOL, there should be an extra type parameter for the key :sob:
+}
 
 let currentId = 0;
-for (const [i, v] of Object.entries(CPACKET_MAP)) {
-	NAME_TO_ID[i] = currentId;
-	ID_TO_PACKET[currentId] = v;
-	ID_TO_NAME[currentId] = i;
-	currentId++;
-}
-for (const [i, v] of Object.entries(SPACKET_MAP)) {
+for (const [i, v] of fixedEntries(CPACKET_MAP)) {
 	NAME_TO_ID[i] = currentId;
 	ID_TO_PACKET[currentId] = v;
 	ID_TO_NAME[currentId] = i;
 	currentId++;
 }
 
-console.log(Object.fromEntries(Object.entries(ID_TO_PACKET).map(([a, b]) => [a, b?.name])));
+for (const [i, v] of fixedEntries(SPACKET_MAP)) {
+	NAME_TO_ID[i] = currentId;
+	ID_TO_PACKET[currentId] = v;
+	ID_TO_NAME[currentId] = i;
+	currentId++;
+}

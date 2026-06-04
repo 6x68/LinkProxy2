@@ -1,7 +1,10 @@
 # Link Proxy (TypeScript edition)
 
-Broken, I gave up on this so... Tell me when you fix it and either spam ping me on GitHub or Discord.
 It's not actually a proxy since I was too lazy to properly implement one. It'd be 20x easier if it was actually a proxy, though.
+
+## Credits
+
+Thanks to `@botbutleast` on Discord for fixing this very-garbage-PoC so it works even close to how I wanted it to. They implemented basic terrain generation and block placing. I've implemented player replication and etc. myself.
 
 ## Why not Rust?
 

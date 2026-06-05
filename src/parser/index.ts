@@ -1,3 +1,3 @@
 // parser/index.ts
 
-export { encode } from "./encoder";
+export { encode } from "./encoder.js";

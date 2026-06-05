@@ -3,6 +3,7 @@ import { Vector3 } from "three";
 import type Client from "./client.js";
 import { PhysicsPlayer } from "./movement/move.js";
 import { World } from "./movement/world.js";
+import Inventory from "./inventory.js";
 
 const world = new World();
 let nextEid = 0;
@@ -13,6 +14,16 @@ export default class Player {
 	health = 20;
 	heldSlot = 0;
 	physics: PhysicsPlayer;
+	checkData = {
+		hadInput: false,
+		hadPos: false,
+		/**
+		 * when first joining, the client only sends Pos packets. It sends 3 pos packets, and starts sending Input packets.
+		 * Exempt order: Pos -> Pos -> Pos -> (done with the initial packets)
+		 * Normal order: Pos -> Input
+		 */
+		inputExempt: 4, // extra leniency, 3 seems to kinda work but kick me sometimes
+	};
 
 	constructor(
 		public client: Client,
@@ -21,6 +32,7 @@ export default class Player {
 		pos: Vector3,
 		public rank?: string,
 		public permissionLevel = 0,
+		public inventory = new Inventory(),
 	) {
 		this.physics = new PhysicsPlayer(world, pos);
 	}

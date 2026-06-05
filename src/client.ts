@@ -29,12 +29,10 @@ export default class Client extends EventEmitter<ClientEvents> {
 			| ArrayBufferView<ArrayBufferLike>,
 	) {
 		if (typeof data === "string") {
-			// If it's a string connect packet "0", parse it as namespace connect
 			if (data === "0") {
 				this.emit("data", { t: 0, d: null, n: "/" });
 				return;
 			}
-			// Try to parse as JSON if possible, otherwise skip or disconnect
 			try {
 				const parsed = JSON.parse(data);
 				this.emit("data", parsed);
@@ -74,6 +72,6 @@ export default class Client extends EventEmitter<ClientEvents> {
 					reason: reason,
 				}),
 			);
-		// this.#socket.close(true);
+		this.#socket.close(true);
 	}
 }

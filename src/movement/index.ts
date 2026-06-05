@@ -30,9 +30,9 @@ export function simulate(
 	player.sneak = sneak;
 	player.jumping = jump;
 
-	player.moveForward = (up ? 1 : 0) - (down ? 1 : 0);
+	player.moveForward = (up ? -1 : 0) + (down ? 1 : 0);
 
-	player.moveStrafe = (left ? 1 : 0) - (right ? 1 : 0);
+	player.moveStrafe = (right ? 1 : 0) + (left ? -1 : 0);
 
 	if (player.sneak) {
 		player.moveForward *= 0.3;

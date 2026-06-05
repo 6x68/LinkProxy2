@@ -4,6 +4,7 @@ import {
 	CPacketBlockUpdate,
 	CPacketDestroyEntities,
 	CPacketJoinGame,
+	CPacketMessage,
 	CPacketPlayerList,
 	CPacketPlayerPosLook,
 	CPacketPlayerReconciliation,
@@ -79,7 +80,7 @@ export default class GameServer {
 			case "SPacketPlayerInput":
 				return this.handleInput(cl, payload);
 			case "SPacketPlayerPosLook":
-				return this.handlePosLook(socket, payload);
+				return this.handlePosLook(cl, payload);
 			case "SPacketPlaceBlock":
 				return this.handlePlace(socket, payload);
 			case "SPacketBreakBlock":
@@ -240,11 +241,17 @@ export default class GameServer {
 		cl.send(new CPacketPong({ time, mspt: 50, tick: 0 }));
 	}
 
-	private handleInput(cl: Client, payload: unknown): void {
-		const pl = payload as SPacketPlayerInput;
-		if (!pl.pos) return;
+	private handleInput(cl: Client, payload: SPacketPlayerInput): void {
 		const player = [...this.players.values()].find((p) => p.client === cl);
 		if (!player) return;
+		player.checkData.hadInput = true;
+		if (!player.checkData.hadPos && player.checkData.inputExempt <= 0) {
+			cl.disconnect("Missing pos look before input packet");
+			return;
+		}
+		player.checkData.hadPos = false;
+		const pl = payload as SPacketPlayerInput;
+		if (!pl.pos) return;
 		// TODO: simulate flying physics. Also, this flag only can get set if the player is in creative mode and flying. see the SPacketPlayerAbilities handler.
 		if (player.physics.abilities.isFlying) return;
 
@@ -256,33 +263,39 @@ export default class GameServer {
 
 		const nextPos = simulate(player.physics, pl);
 		if (nextPos) player.physics.pos.copy(nextPos);
+		const reconcile = new CPacketPlayerReconciliation({
+			lastProcessedInput: pl.sequenceNumber,
+			pitch: pl.pitch,
+			yaw: pl.yaw,
+			reset: false,
+			x: nextPos?.x ?? player.physics.pos.x,
+			y: nextPos?.y ?? player.physics.pos.y,
+			z: nextPos?.z ?? player.physics.pos.z,
+		});
 
-		cl.send(
-			new CPacketPlayerReconciliation({
-				lastProcessedInput: pl.sequenceNumber,
-				pitch: pl.pitch,
-				yaw: pl.yaw,
-				reset: false,
-				x: nextPos?.x ?? pl.pos.x!,
-				y: nextPos?.y ?? pl.pos.y!,
-				z: nextPos?.z ?? pl.pos.z!,
-			}),
-		);
+		cl.send(reconcile);
 	}
 
-	private handlePosLook(_socket: Socket, _payload: unknown): void {
-		// SPacketPlayerPosLook is sent by the client on every movement alongside
-		// SPacketPlayerInput. Trusting its position would bypass physics simulation,
-		// so we ignore it — movement is handled entirely through handleInput.
+	private handlePosLook(cl: Client, _payload: unknown): void {
+		const player = [...this.players.values()].find((p) => p.client === cl);
+		if (!player) return;
+		const { checkData } = player;
+		if (checkData.inputExempt > 0) {
+			checkData.inputExempt--;
+		}
+		if (!checkData.hadInput && checkData.inputExempt <= 0) {
+			cl.disconnect("Missing input packet before pos look packet");
+			return;
+		}
+		checkData.hadPos = true;
+		checkData.hadInput = false;
 	}
 
 	private handlePlace(socket: Socket, payload: unknown): void {
 		const player = this.getPlayer(socket);
 		if (!player) return;
-		const pkt = payload as Record<string, unknown>;
-		const posIn = pkt.positionIn as
-			| { x?: number; y?: number; z?: number }
-			| undefined;
+		const pkt = payload as SPacketPlaceBlock;
+		const posIn = pkt.positionIn;
 		if (!posIn) return;
 		const side = pkt.side;
 		const NUM_OFFSET: [number, number, number][] = [

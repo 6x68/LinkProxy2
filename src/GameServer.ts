@@ -3,6 +3,7 @@ import { type Socket } from "engine.io";
 import {
 	CPacketBlockUpdate,
 	CPacketDestroyEntities,
+	CPacketEntityProperties,
 	CPacketJoinGame,
 	CPacketMessage,
 	CPacketPlayerList,
@@ -13,6 +14,8 @@ import {
 	CPacketTimeUpdate,
 	PBCosmetics,
 	PBFloatVector3,
+	PBModifier,
+	PBSnapshot,
 	PlayerData,
 	SPacketEntityAction,
 	SPacketHeldItemChange,
@@ -26,6 +29,7 @@ import Player from "./player.js";
 import { ID_TO_NAME, type SPACKET_MAP } from "./protocol/index.js";
 import { createFlatChunk } from "./terrain.js";
 import { simulate } from "./movement/index.js";
+import { PhysicsPlayer } from "./movement/move.js";
 
 const FACE_OFFSET: Record<string, [number, number, number]> = {
 	DOWN: [0, 1, 0],
@@ -288,7 +292,14 @@ export default class GameServer {
 			const clientPos = new Vector3(pl.pos.x!, pl.pos.y!, pl.pos.z!);
 			const ep = checkData.predictedNextPos;
 			const dist = clientPos.distanceTo(ep);
-			if (dist > 0.003) {
+			/*
+				The speed boost for sprinting should be calculated on the client (client starts sprinting and tells server -> client updates speed attribute -> instantly starts going faster),
+				not the server (client tells server -> c2s latency -> server updates move speed attribute -> s2c latency -> client receives it and goes faster).
+				Doing so just adds latency,
+				and it makes it worse anticheat wise since you have to add more latency compensation to see
+				when the player actually got the move speed attribute update and then simulate properly.
+			*/
+			if (dist > 0.07) {
 				console.info(`Server distance: ${dist}`);
 				reset = true;
 			}
@@ -305,6 +316,24 @@ export default class GameServer {
 			player.physics.pos.copy(nextPos);
 			checkData.lastAuthoritativePos.copy(nextPos);
 			checkData.predictedNextPos = nextPos.clone();
+		}
+
+		if (pl.sprint !== undefined && pl.sprint !== checkData.prevSprinting) {
+			checkData.prevSprinting = pl.sprint;
+			cl.send(
+				new CPacketEntityProperties({
+					id: player.entityId,
+					data: [
+						new PBSnapshot({
+							id: "generic.movementSpeed",
+							value: player.physics.movementSpeedAttribute.getBaseValue(),
+							modifiers: pl.sprint
+								? ([PhysicsPlayer.SPRINT_MODIFIER.toProto()] as const)
+								: [],
+						}),
+					],
+				}),
+			);
 		}
 
 		if (reset) {

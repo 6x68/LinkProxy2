@@ -26,7 +26,7 @@ export function simulate(
 		return undefined;
 	player.yaw = yaw;
 
-	player.sprinting = sprint;
+	player.setSprinting(sprint);
 	player.sneak = sneak;
 	player.jumping = jump;
 

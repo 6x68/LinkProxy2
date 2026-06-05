@@ -1,7 +1,13 @@
+import { PBModifier } from "../../gen/protocol2_pb.js";
+
 export enum AttributeOperation {
 	ADD_NUMBER = 0,
 	ADD_SCALAR = 1,
 	MULTIPLY_TOTAL = 2,
+}
+
+function opToProto(op: AttributeOperation): number {
+	return op; // TODO: maybe these differ?
 }
 
 export class AttributeModifier {
@@ -11,6 +17,13 @@ export class AttributeModifier {
 		public readonly amount: number,
 		public readonly operation: AttributeOperation,
 	) {}
+	toProto(): PBModifier {
+		return new PBModifier({
+			amount: this.amount,
+			id: this.id,
+			operation: this.operation,
+		});
+	}
 }
 export class AttributeInstance {
 	private baseValue: number;

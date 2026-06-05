@@ -27,6 +27,7 @@ export default class Player {
 		lastAuthoritativePos: new Vector3(),
 		predictedNextPos: null as Vector3 | null,
 		lastSequenceNumber: NaN,
+		prevSprinting: false,
 	};
 
 	constructor(

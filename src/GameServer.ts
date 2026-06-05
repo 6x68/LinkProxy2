@@ -14,8 +14,11 @@ import {
 	PBCosmetics,
 	PBFloatVector3,
 	PlayerData,
+	SPacketEntityAction,
+	SPacketHeldItemChange,
 	SPacketPlaceBlock,
 	SPacketPlayerAbilities,
+	SPacketPlayerPosLook,
 	type SPacketPlayerInput,
 } from "../gen/protocol2_pb.js";
 import Client from "./client.js";
@@ -86,7 +89,7 @@ export default class GameServer {
 			case "SPacketBreakBlock":
 				return this.handleBreak(socket, payload);
 			case "SPacketPlayerAbilities": {
-				const player = this.players.get(this.getSid(socket));
+				const player = this.getPlayer(socket);
 				if (!player) return;
 				if (player.gamemode !== "creative") {
 					cl.disconnect(
@@ -100,6 +103,18 @@ export default class GameServer {
 			}
 			case "SPacketClick":
 				break; // TODO
+			case "SPacketEntityAction": {
+				const player = this.getPlayer(socket);
+				if (!player) return;
+				const pl = payload as SPacketEntityAction;
+				if (pl.id !== player.entityId) {
+					cl.disconnect(
+						"Sent entity action with a different entity ID than your entity ID",
+					);
+					return;
+				}
+				return;
+			}
 			case "SPacketHeldItemChange":
 				return this.handleHeld(socket, payload);
 		}
@@ -244,16 +259,40 @@ export default class GameServer {
 	private handleInput(cl: Client, payload: SPacketPlayerInput): void {
 		const player = [...this.players.values()].find((p) => p.client === cl);
 		if (!player) return;
-		player.checkData.hadInput = true;
-		if (!player.checkData.hadPos && player.checkData.inputExempt <= 0) {
+		const { checkData } = player;
+		if (!payload.sequenceNumber) {
+			cl.disconnect("No sequence number in packet");
+			return;
+		}
+		if (
+			!Number.isNaN(checkData.lastSequenceNumber) &&
+			payload.sequenceNumber <= checkData.lastSequenceNumber
+		) {
+			cl.disconnect("Sequence number went backwards???");
+			return;
+		} else {
+			checkData.lastSequenceNumber = payload.sequenceNumber;
+		}
+		checkData.hadInput = true;
+		if (!checkData.hadPos && checkData.inputOrderExempt <= 0) {
 			cl.disconnect("Missing pos look before input packet");
 			return;
 		}
-		player.checkData.hadPos = false;
-		const pl = payload as SPacketPlayerInput;
+		checkData.hadPos = false;
+		const pl = payload;
 		if (!pl.pos) return;
-		// TODO: simulate flying physics. Also, this flag only can get set if the player is in creative mode and flying. see the SPacketPlayerAbilities handler.
-		if (player.physics.abilities.isFlying) return;
+
+		let reset = false;
+
+		if (checkData.predictedNextPos) {
+			const clientPos = new Vector3(pl.pos.x!, pl.pos.y!, pl.pos.z!);
+			const ep = checkData.predictedNextPos;
+			const dist = clientPos.distanceTo(ep);
+			if (dist > 0.003) {
+				console.info(`Server distance: ${dist}`);
+				reset = true;
+			}
+		}
 
 		player.physics.pos.set(pl.pos.x!, pl.pos.y!, pl.pos.z!);
 		player.physics.boundingBox = new Box3(
@@ -262,28 +301,38 @@ export default class GameServer {
 		);
 
 		const nextPos = simulate(player.physics, pl);
-		if (nextPos) player.physics.pos.copy(nextPos);
-		const reconcile = new CPacketPlayerReconciliation({
-			lastProcessedInput: pl.sequenceNumber,
-			pitch: pl.pitch,
-			yaw: pl.yaw,
-			reset: false,
-			x: nextPos?.x ?? player.physics.pos.x,
-			y: nextPos?.y ?? player.physics.pos.y,
-			z: nextPos?.z ?? player.physics.pos.z,
-		});
+		if (nextPos) {
+			player.physics.pos.copy(nextPos);
+			checkData.lastAuthoritativePos.copy(nextPos);
+			checkData.predictedNextPos = nextPos.clone();
+		}
 
-		cl.send(reconcile);
+		if (reset) {
+			// if you get setback, your sequence number gets set to 0.
+			checkData.lastSequenceNumber = -1;
+		}
+
+		cl.send(
+			new CPacketPlayerReconciliation({
+				lastProcessedInput: pl.sequenceNumber,
+				pitch: pl.pitch,
+				yaw: pl.yaw,
+				reset,
+				x: nextPos?.x ?? checkData.lastAuthoritativePos.x,
+				y: nextPos?.y ?? checkData.lastAuthoritativePos.y,
+				z: nextPos?.z ?? checkData.lastAuthoritativePos.z,
+			}),
+		);
 	}
 
-	private handlePosLook(cl: Client, _payload: unknown): void {
+	private handlePosLook(cl: Client, payload: SPacketPlayerPosLook): void {
 		const player = [...this.players.values()].find((p) => p.client === cl);
 		if (!player) return;
 		const { checkData } = player;
-		if (checkData.inputExempt > 0) {
-			checkData.inputExempt--;
+		if (checkData.inputOrderExempt > 0) {
+			checkData.inputOrderExempt--;
 		}
-		if (!checkData.hadInput && checkData.inputExempt <= 0) {
+		if (!checkData.hadInput && checkData.inputOrderExempt <= 0) {
 			cl.disconnect("Missing input packet before pos look packet");
 			return;
 		}
@@ -335,10 +384,10 @@ export default class GameServer {
 		for (const p of this.players.values()) p.client.send(update);
 	}
 
-	private handleHeld(socket: Socket, payload: unknown): void {
+	private handleHeld(socket: Socket, payload: SPacketHeldItemChange): void {
 		const player = this.getPlayer(socket);
 		if (!player) return;
-		player.heldSlot = (payload as { slot?: number }).slot ?? 0;
+		player.heldSlot = payload.slot ?? 0;
 	}
 
 	private handleDisconnect(socket: Socket): void {
@@ -364,7 +413,7 @@ export default class GameServer {
 						name: p.name,
 						uuid: p.uuid,
 						ping: 0,
-						permissionLevel: 0,
+						permissionLevel: p.permissionLevel,
 					}),
 			),
 		});

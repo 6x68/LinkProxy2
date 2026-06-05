@@ -18,11 +18,15 @@ export default class Player {
 		hadInput: false,
 		hadPos: false,
 		/**
-		 * when first joining, the client only sends Pos packets. It sends 3 pos packets, and starts sending Input packets.
+		 * When first joining, the client only sends Pos packets. It sends 3 pos packets, and starts sending Input packets.
+		 * We need this exempt because we check for.
 		 * Exempt order: Pos -> Pos -> Pos -> (done with the initial packets)
 		 * Normal order: Pos -> Input
 		 */
-		inputExempt: 4, // extra leniency, 3 seems to kinda work but kick me sometimes
+		inputOrderExempt: 4, // extra leniency, 3 seems to kinda work but kick me sometimes
+		lastAuthoritativePos: new Vector3(),
+		predictedNextPos: null as Vector3 | null,
+		lastSequenceNumber: NaN,
 	};
 
 	constructor(
@@ -35,5 +39,6 @@ export default class Player {
 		public inventory = new Inventory(),
 	) {
 		this.physics = new PhysicsPlayer(world, pos);
+		this.checkData.lastAuthoritativePos.copy(pos);
 	}
 }

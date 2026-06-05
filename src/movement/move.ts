@@ -5,6 +5,11 @@ import Blocks from "./blocks.js";
 import type { BlockState } from "./blockstate.js";
 import handleMaterialAcceleration from "./materials/acceleration.js";
 import Materials from "./materials/registry.js";
+import {
+	AttributeInstance,
+	AttributeModifier,
+	AttributeOperation,
+} from "./attributes.js";
 
 export interface PhysicsWorld {
 	getCollidingBoundingBoxes(entity: PhysicsPlayer, box: Box3): Box3[];
@@ -12,6 +17,7 @@ export interface PhysicsWorld {
 	getBlockState(x: number, y: number, z: number): BlockState;
 	isLadder(x: number, y: number, z: number): boolean;
 	isIronLadder(x: number, y: number, z: number): boolean;
+	setBlock(x: number, y: number, z: number, blockId: number): void;
 }
 
 function calculateXOffset(m: Box3, u: Box3, h: number): number {
@@ -128,6 +134,16 @@ export class PhysicsPlayer {
 	inWater = false;
 	fallDistance = 0;
 	inLava = false;
+	readonly movementSpeedAttribute = new AttributeInstance(0.1);
+	static readonly SPRINT_MODIFIER = new AttributeModifier(
+		"sprint",
+		"Sprinting speed boost",
+		0.3,
+		AttributeOperation.MULTIPLY_TOTAL,
+	);
+	readonly abilities = {
+		isFlying: false,
+	};
 
 	constructor(world: PhysicsWorld, pos = new Vector3()) {
 		this.world = world;
@@ -143,12 +159,28 @@ export class PhysicsPlayer {
 		return this.sprinting;
 	}
 
+	setSprinting(value: boolean): void {
+		if (value === this.sprinting) {
+			return;
+		}
+
+		this.sprinting = value;
+
+		const attr = this.movementSpeedAttribute;
+
+		attr.removeModifier("sprint");
+
+		if (value) {
+			attr.applyModifier(PhysicsPlayer.SPRINT_MODIFIER);
+		}
+	}
+
 	getJumpMovementFactor(): number {
 		return this.sprinting ? this.speedInAir * 1.3 : this.speedInAir;
 	}
 
 	getAIMoveSpeed(): number {
-		return this.movementSpeed;
+		return this.movementSpeedAttribute.getAttributeValue();
 	}
 
 	getEntityBoundingBox(): Box3 {
@@ -573,12 +605,12 @@ export class PhysicsPlayer {
 		let friction = 0.91;
 
 		if (this.onGround) {
-			friction =
-				this.world.getBlockState(
-					Math.floor(this.pos.x),
-					Math.floor(this.boundingBox.min.y) - 1,
-					Math.floor(this.pos.z),
-				).block.slipperiness * 0.91;
+			const slipperiness = this.world.getBlockState(
+				Math.floor(this.pos.x),
+				Math.floor(this.boundingBox.min.y) - 1,
+				Math.floor(this.pos.z),
+			).block.slipperiness;
+			friction = slipperiness * 0.91;
 		}
 
 		const accel = this.onGround
@@ -644,7 +676,6 @@ export class PhysicsPlayer {
 
 		this.moveStrafe *= 0.98;
 		this.moveForward *= 0.98;
-
 		this.moveEntityWithHeading(this.moveStrafe, this.moveForward);
 	}
 }

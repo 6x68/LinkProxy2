@@ -128,6 +128,17 @@ export class World implements PhysicsWorld {
 		};
 	}
 
+	setBlock(x: number, y: number, z: number, blockId: number): void {
+		if (y < 0 || y >= WORLD_HEIGHT) return;
+		const cx = Math.floor(x / CHUNK_SIZE);
+		const cz = Math.floor(z / CHUNK_SIZE);
+		const lx = ((x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+		const lz = ((z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+		const chunk = this.ensureChunkExists(cx, cz);
+		const idx = Math.floor(y) * CHUNK_SIZE * CHUNK_SIZE + Math.floor(lz) * CHUNK_SIZE + Math.floor(lx);
+		chunk[idx] = blockId;
+	}
+
 	isLadder(_x: number, _y: number, _z: number): boolean {
 		return false;
 	}

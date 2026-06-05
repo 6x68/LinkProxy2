@@ -282,14 +282,37 @@ export default class GameServer {
 			cl.disconnect("Missing pos look before input packet");
 			return;
 		}
+		if (!payload.pos) {
+			cl.disconnect("Missing position in SPacketPlayerInput");
+			return;
+		}
 		checkData.hadPos = false;
-		const pl = payload;
-		if (!pl.pos) return;
+		if (player.physics.abilities.isFlying) {
+			// just accept it.
+			// TODO: simulate even while flying. it'd require a bit more code, and its flying so who cares anyway. this isn't like mc where making fly speed faster is a common thing in "legit" / "pvp" clients.
+			cl.send(
+				new CPacketPlayerReconciliation({
+					lastProcessedInput: payload.sequenceNumber,
+					pitch: payload.pitch,
+					yaw: payload.yaw,
+					reset: false,
+					x: payload.pos.x,
+					y: payload.pos.y,
+					z: payload.pos.z,
+				}),
+			);
+			return;
+		}
+		if (!payload.pos) return;
 
 		let reset = false;
 
 		if (checkData.predictedNextPos) {
-			const clientPos = new Vector3(pl.pos.x!, pl.pos.y!, pl.pos.z!);
+			const clientPos = new Vector3(
+				payload.pos.x!,
+				payload.pos.y!,
+				payload.pos.z!,
+			);
 			const ep = checkData.predictedNextPos;
 			const dist = clientPos.distanceTo(ep);
 			/*
@@ -305,21 +328,28 @@ export default class GameServer {
 			}
 		}
 
-		player.physics.pos.set(pl.pos.x!, pl.pos.y!, pl.pos.z!);
+		player.physics.pos.set(payload.pos.x!, payload.pos.y!, payload.pos.z!);
 		player.physics.boundingBox = new Box3(
-			new Vector3(pl.pos.x! - 0.3, pl.pos.y!, pl.pos.z! - 0.3),
-			new Vector3(pl.pos.x! + 0.3, pl.pos.y! + 1.8, pl.pos.z! + 0.3),
+			new Vector3(payload.pos.x! - 0.3, payload.pos.y!, payload.pos.z! - 0.3),
+			new Vector3(
+				payload.pos.x! + 0.3,
+				payload.pos.y! + 1.8,
+				payload.pos.z! + 0.3,
+			),
 		);
 
-		const nextPos = simulate(player.physics, pl);
+		const nextPos = simulate(player.physics, payload);
 		if (nextPos) {
 			player.physics.pos.copy(nextPos);
 			checkData.lastAuthoritativePos.copy(nextPos);
 			checkData.predictedNextPos = nextPos.clone();
 		}
 
-		if (pl.sprint !== undefined && pl.sprint !== checkData.prevSprinting) {
-			checkData.prevSprinting = pl.sprint;
+		if (
+			payload.sprint !== undefined &&
+			payload.sprint !== checkData.prevSprinting
+		) {
+			checkData.prevSprinting = payload.sprint;
 			cl.send(
 				new CPacketEntityProperties({
 					id: player.entityId,
@@ -327,7 +357,7 @@ export default class GameServer {
 						new PBSnapshot({
 							id: "generic.movementSpeed",
 							value: player.physics.movementSpeedAttribute.getBaseValue(),
-							modifiers: pl.sprint
+							modifiers: payload.sprint
 								? ([PhysicsPlayer.SPRINT_MODIFIER.toProto()] as const)
 								: [],
 						}),
@@ -343,9 +373,9 @@ export default class GameServer {
 
 		cl.send(
 			new CPacketPlayerReconciliation({
-				lastProcessedInput: pl.sequenceNumber,
-				pitch: pl.pitch,
-				yaw: pl.yaw,
+				lastProcessedInput: payload.sequenceNumber,
+				pitch: payload.pitch,
+				yaw: payload.yaw,
 				reset,
 				x: nextPos?.x ?? checkData.lastAuthoritativePos.x,
 				y: nextPos?.y ?? checkData.lastAuthoritativePos.y,

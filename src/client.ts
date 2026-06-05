@@ -12,13 +12,16 @@ export interface ClientEvents {
 /** Represents a connected client. */
 export default class Client extends EventEmitter<ClientEvents> {
 	/** the underlying Socket for this connection. */
-	#socket: Socket;
+	readonly #socket: Socket;
+	/** the socket's ID */
+	readonly id: string;
 	/** Constructs a client from a socket. */
 	constructor(socket: Socket) {
 		super();
 		this.#socket = socket;
 		this.#socket.on("message", this.#onData.bind(this));
 		this.#socket.on("close", (a) => this.emit("close", a));
+		this.id = (socket as unknown as Omit<Socket, "id"> & { id: string }).id;
 	}
 	/** Handles data coming from the client. This is always MsgPack (Protobuf object -> object.toJSON -> MsgPack -> Sent), so we don't need anything else. */
 	#onData(

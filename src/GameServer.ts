@@ -3,7 +3,9 @@ import { type Socket } from "engine.io";
 import {
 	CPacketBlockUpdate,
 	CPacketDestroyEntities,
+	CPacketEntityPositionAndRotation,
 	CPacketEntityProperties,
+	CPacketEntityRelativePositionAndRotation,
 	CPacketJoinGame,
 	CPacketMessage,
 	CPacketPlayerList,
@@ -16,6 +18,7 @@ import {
 	PBFloatVector3,
 	PBSnapshot,
 	PlayerData,
+	SPacketBreakBlock,
 	SPacketEntityAction,
 	SPacketHeldItemChange,
 	SPacketPlaceBlock,
@@ -187,16 +190,17 @@ export default class GameServer {
 					cheats: "admin-enabled",
 					pvpEnabled: true,
 					startTime: BigInt(Date.now()),
-					playerPermissionEntries: [
-						{
+					playerPermissionEntries: this.players
+						.values()
+						.map((player) => ({
 							uuid: player.uuid,
 							username: player.name,
 							permissionLevel: player.permissionLevel,
 							rank: "",
 							level: 3,
 							verified: true,
-						},
-					],
+						}))
+						.toArray(),
 					metadata: "{}",
 					commandBlocksEnabled: true,
 				},
@@ -210,7 +214,7 @@ export default class GameServer {
 
 		cl.send(new CPacketTimeUpdate({ totalTime: 6000, worldTime: 6000 }));
 
-		const sid = this.getSid(socket);
+		const sid = cl.id;
 
 		for (const [existingSid, existing] of this.players) {
 			cl.send(this.spawnPacket(existing, existingSid));
@@ -238,7 +242,7 @@ export default class GameServer {
 			}),
 			operator: p.permissionLevel >= 200,
 			rank: p.rank,
-			yaw: 0,
+			yaw: p.physics.yaw,
 			pitch: 0,
 			cosmetics: new PBCosmetics({
 				skin: "bob",
@@ -258,6 +262,23 @@ export default class GameServer {
 		const p = payload as Record<string, unknown> | undefined;
 		const time = p?.time ? BigInt(p.time as number) : 0n;
 		cl.send(new CPacketPong({ time, mspt: 50, tick: 0 }));
+	}
+
+	private replicatePlayerPos(
+		of: Player,
+		state: {
+			onGround: boolean;
+			yaw: number;
+			pitch: number;
+			pos: Vector3;
+			vel: Vector3;
+		},
+	) {
+		for (const [existingSid, existing] of this.players) {
+			if (existingSid === of.client.id) continue;
+			// TODO: proper replication
+			// it should send a relative entity movement packet 
+		}
 	}
 
 	private handleInput(cl: Client, payload: SPacketPlayerInput): void {
@@ -301,17 +322,23 @@ export default class GameServer {
 					z: payload.pos.z,
 				}),
 			);
+			this.replicatePlayerPos(player, {
+				onGround: false,
+				pitch: payload.pitch!,
+				pos: new Vector3(payload.pos.x, payload.pos.y, payload.pos.z),
+				vel: new Vector3(),
+				yaw: payload.yaw!,
+			});
 			return;
 		}
-		if (!payload.pos) return;
 
 		let reset = false;
 
 		if (checkData.predictedNextPos) {
 			const clientPos = new Vector3(
-				payload.pos.x!,
-				payload.pos.y!,
-				payload.pos.z!,
+				payload.pos.x,
+				payload.pos.y,
+				payload.pos.z,
 			);
 			const ep = checkData.predictedNextPos;
 			const dist = clientPos.distanceTo(ep);
@@ -370,6 +397,19 @@ export default class GameServer {
 			// if you get setback, your sequence number gets set to 0.
 			checkData.lastSequenceNumber = -1;
 		}
+		const pos = new Vector3(
+			nextPos?.x ?? checkData.lastAuthoritativePos.x,
+			nextPos?.y ?? checkData.lastAuthoritativePos.y,
+			nextPos?.z ?? checkData.lastAuthoritativePos.z,
+		);
+
+		this.replicatePlayerPos(player, {
+			onGround: false,
+			pitch: payload.pitch!,
+			yaw: payload.yaw!,
+			pos,
+			vel: new Vector3(),
+		});
 
 		cl.send(
 			new CPacketPlayerReconciliation({
@@ -377,9 +417,9 @@ export default class GameServer {
 				pitch: payload.pitch,
 				yaw: payload.yaw,
 				reset,
-				x: nextPos?.x ?? checkData.lastAuthoritativePos.x,
-				y: nextPos?.y ?? checkData.lastAuthoritativePos.y,
-				z: nextPos?.z ?? checkData.lastAuthoritativePos.z,
+				x: pos.x,
+				y: pos.y,
+				z: pos.z,
 			}),
 		);
 	}
@@ -427,7 +467,7 @@ export default class GameServer {
 		for (const p of this.players.values()) p.client.send(update);
 	}
 
-	private handleBreak(socket: Socket, payload: unknown): void {
+	private handleBreak(socket: Socket, payload: SPacketBreakBlock): void {
 		const player = this.getPlayer(socket);
 		const pkt = payload as {
 			location?: { x?: number; y?: number; z?: number };

@@ -29,6 +29,7 @@ export default class Player {
 		lastSequenceNumber: NaN,
 		prevSprinting: false,
 	};
+	readonly socketId: string;
 
 	constructor(
 		public client: Client,
@@ -39,6 +40,7 @@ export default class Player {
 		public permissionLevel = 0,
 		public inventory = new Inventory(),
 	) {
+		this.socketId = client.id;
 		this.physics = new PhysicsPlayer(world, pos);
 		this.checkData.lastAuthoritativePos.copy(pos);
 	}

@@ -48,6 +48,7 @@ import { PhysicsPlayer } from "./movement/move.js";
 import Rotation from "./rotation.js";
 import {
 	DirectionString,
+	EnumFacing,
 	fromProto,
 	fromProtoString,
 	opposite,
@@ -125,10 +126,10 @@ export default class GameServer {
 					cl.disconnect(
 						"Sent player abilities packet with isFlying while not in creative mode",
 					);
-					player.physics.abilities.isFlying = false;
+					player.physics.abilities.flying = false;
 					return;
 				}
-				player.physics.abilities.isFlying = !!pl.isFlying;
+				player.physics.abilities.flying = !!pl.isFlying;
 				return;
 			}
 			case "SPacketClick":
@@ -354,9 +355,7 @@ export default class GameServer {
 		checkData.lastSequenceNumber = payload.sequenceNumber;
 		checkData.hadInput = true;
 		if (!checkData.hadPos && checkData.inputOrderExempt <= 0) {
-			console.warn(
-				`[Server] Missing pos look before input packet for player ${player.name}. (Bypassing kick)`,
-			);
+			cl.disconnect("Missing pos look before input packet");
 		}
 		if (!payload.pos) {
 			cl.disconnect("Missing pos in SPacketPlayerInput");
@@ -374,47 +373,18 @@ export default class GameServer {
 		if (!pl.pos) return;
 		player.rotation.yaw = yaw;
 		player.rotation.pitch = pitch;
-		if (player.physics.abilities.isFlying) {
-			cl.send(
-				new CPacketPlayerReconciliation({
-					lastProcessedInput: payload.sequenceNumber,
-					pitch,
-					yaw,
-					reset: false,
-					x: pl.pos.x,
-					y: pl.pos.y,
-					z: pl.pos.z,
-				}),
-			);
-
-			const pos = new Vector3(payload.pos.x, payload.pos.y, payload.pos.z);
-			player.physics.pos.copy(pos);
-			player.physics.boundingBox = new Box3(
-				new Vector3(pos.x - 0.3, pos.y, pos.z - 0.3),
-				new Vector3(pos.x + 0.3, pos.y + 1.8, pos.z + 0.3),
-			);
-
-			this.replicatePlayerPos(player, {
-				onGround: false,
-				pos,
-				vel: new Vector3(),
-			});
-			return;
-		}
 
 		let reset = false;
 
 		if (checkData.teleportTarget) {
 			const clientPos = new Vector3(pl.pos.x!, pl.pos.y!, pl.pos.z!);
 			const dist = clientPos.distanceTo(checkData.teleportTarget);
-			if (dist > 0.1) {
+			if (dist > Number.EPSILON) {
 				console.warn(
 					`[Server] Teleport check failed: client sent pos (${clientPos.x}, ${clientPos.y}, ${clientPos.z}) but target was (${checkData.teleportTarget.x}, ${checkData.teleportTarget.y}, ${checkData.teleportTarget.z}) (dist: ${dist}). Resetting position.`,
 				);
 				reset = true;
-				pl.pos.x = checkData.teleportTarget.x;
-				pl.pos.y = checkData.teleportTarget.y;
-				pl.pos.z = checkData.teleportTarget.z;
+				player.physics.pos.copy(checkData.teleportTarget);
 			}
 			checkData.teleportTarget = null;
 		} else if (checkData.predictedNextPos) {
@@ -425,21 +395,27 @@ export default class GameServer {
 			);
 			const ep = checkData.predictedNextPos;
 			const dist = clientPos.distanceTo(ep);
-			/*
-				Doing so just adds latency,
-				and it makes it worse anticheat wise since you have to add more latency compensation to see
-				when the player actually got the move speed attribute update and then simulate properly.
-			*/
 			if (dist > 0.07) {
 				console.info(`Server distance: ${dist}`);
 				reset = true;
+			} else if (dist < 0.03) {
+				checkData.lastAuthoritativePos.copy(clientPos);
 			}
 		}
 
-		player.physics.pos.set(pl.pos.x!, pl.pos.y!, pl.pos.z!);
+		const { lastAuthoritativePos } = checkData;
+		player.physics.pos.copy(lastAuthoritativePos);
 		player.physics.boundingBox = new Box3(
-			new Vector3(pl.pos.x! - 0.3, pl.pos.y!, pl.pos.z! - 0.3),
-			new Vector3(pl.pos.x! + 0.3, pl.pos.y! + 1.8, pl.pos.z! + 0.3),
+			new Vector3(
+				lastAuthoritativePos.x - 0.3,
+				lastAuthoritativePos.y,
+				lastAuthoritativePos.z - 0.3,
+			),
+			new Vector3(
+				lastAuthoritativePos.x + 0.3,
+				lastAuthoritativePos.y + 1.8,
+				lastAuthoritativePos.z + 0.3,
+			),
 		);
 
 		const nextPos = simulate(player.physics, pl);
@@ -546,11 +522,12 @@ export default class GameServer {
 
 		function cancel(reason?: string) {
 			if (player === undefined) return;
-			player.client.send(
-				new CPacketMessage({
-					text: `Cancel block placement: ${reason}`,
-				}),
-			);
+			if (reason)
+				player.client.send(
+					new CPacketMessage({
+						text: `Cancel block placement: ${reason}`,
+					}),
+				);
 			const air = new CPacketBlockUpdate({ id: 0, x: bx, y: by, z: bz });
 			player.client.send(air);
 		}
@@ -583,9 +560,12 @@ export default class GameServer {
 			trace.block?.z !== posIn.z
 		)
 			return cancel("traced block pos doesn't match");
-		if (trace.side !== realSide) return cancel("traced side !== client side");
+		if (trace.side !== realSide)
+			return cancel(
+				`traced side ${EnumFacing[trace.side]} !== client side ${EnumFacing[realSide]}`,
+			);
 
-		const EPS = 0.2;
+		const EPS = 0.5;
 		if (
 			payload.hitX !== undefined &&
 			payload.hitY !== undefined &&
@@ -611,7 +591,7 @@ export default class GameServer {
 				bb.max.z > blockBox.min.z &&
 				bb.min.z < blockBox.max.z
 			) {
-				return cancel("block intersecting with a player");
+				return; // normal clients simulate this properly and don't allow this to happen, they still send the packet that does this anyway.
 			}
 		}
 
@@ -629,9 +609,7 @@ export default class GameServer {
 
 	private handleBreak(socket: Socket, payload: SPacketBreakBlock): void {
 		const player = this.getPlayer(socket);
-		const pkt = payload as {
-			location?: { x?: number; y?: number; z?: number };
-		};
+		const pkt = payload;
 		if (!pkt.location) return;
 		const x = pkt.location.x ?? 0;
 		const y = pkt.location.y ?? 0;
@@ -742,7 +720,7 @@ export default class GameServer {
 
 				if (mode) {
 					player.gamemode = mode;
-					player.physics.abilities.isFlying = false;
+					player.physics.abilities.flying = false;
 					this.resetSequenceAndPosition(player);
 
 					// Broadcast status update to all players
@@ -832,8 +810,6 @@ export default class GameServer {
 					);
 				}
 			} else if (command === "spawn") {
-				player.physics.pos.set(0, 70, 0);
-				player.checkData.lastAuthoritativePos.set(0, 70, 0);
 				this.resetSequenceAndPosition(player);
 				player.checkData.teleportTarget = player.physics.pos.clone();
 				player.client.send(
@@ -911,7 +887,7 @@ export default class GameServer {
 		const isCrit =
 			!attacker.physics.onGround &&
 			attacker.physics.motion.y < 0 &&
-			!attacker.physics.abilities.isFlying;
+			!attacker.physics.abilities.flying;
 
 		// 4. Calculate damage
 		let damage = 2; // 1 heart
@@ -994,10 +970,6 @@ export default class GameServer {
 
 		// Apply velocity to server-side physics
 		target.physics.motion.copy(knockbackVelocity);
-
-		// Exempt from position prediction checkpoints on next packet
-		target.checkData.predictedNextPos = null;
-		target.checkData.inputOrderExempt = 5;
 
 		// Replicate velocity to the target client
 		target.client.send(

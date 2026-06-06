@@ -141,8 +141,9 @@ export class PhysicsPlayer {
 		AttributeOperation.MULTIPLY_TOTAL,
 	);
 	readonly abilities = {
-		isFlying: false,
+		flying: false,
 	};
+	flySpeed = 0.04;
 
 	constructor(world: PhysicsWorld, pos = new Vector3()) {
 		this.world = world;
@@ -188,6 +189,9 @@ export class PhysicsPlayer {
 	}
 
 	getJumpMovementFactor(): number {
+		if (this.abilities.flying) {
+			return this.flySpeed * (this.isSprinting() ? 2 : 1);
+		}
 		return this.sprinting ? this.speedInAir * 1.3 : this.speedInAir;
 	}
 
@@ -661,15 +665,23 @@ export class PhysicsPlayer {
 			this.motion.y = this.getLadderSpeed();
 		}
 
-		if (!this.abilities.isFlying) {
-			this.motion.y -= 0.08;
-		}
+		this.motion.y -= 0.08;
 		this.motion.y *= 0.98;
 
 		this.motion.x *= friction;
 		this.motion.z *= friction;
 	}
-
+	tickFlying(): void {
+		if (this.jumping) {
+			this.motion.y += this.flySpeed * 3;
+		}
+		if (this.sneak) {
+			this.motion.y -= this.flySpeed * 3;
+		}
+		const oldY = this.motion.y;
+		this.moveEntityWithHeading(this.moveStrafe, this.moveForward);
+		this.motion.y = oldY * 0.6;
+	}
 	tick(): void {
 		if (this.jumpTicks > 0) {
 			--this.jumpTicks;
@@ -679,7 +691,7 @@ export class PhysicsPlayer {
 		if (Math.abs(this.motion.y) < 0.005) this.motion.y = 0;
 		if (Math.abs(this.motion.z) < 0.005) this.motion.z = 0;
 
-		if (this.jumping) {
+		if (this.jumping && !this.abilities.flying) {
 			if (this.onGround && this.jumpTicks === 0) {
 				this.jump();
 				this.jumpTicks = 10;
@@ -690,6 +702,7 @@ export class PhysicsPlayer {
 
 		this.moveStrafe *= 0.98;
 		this.moveForward *= 0.98;
-		this.moveEntityWithHeading(this.moveStrafe, this.moveForward);
+		if (this.abilities.flying) this.tickFlying();
+		else this.moveEntityWithHeading(this.moveStrafe, this.moveForward);
 	}
 }

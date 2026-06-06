@@ -309,16 +309,34 @@ export default class GameServer {
 		of: Player,
 		state: {
 			onGround: boolean;
-			yaw: number;
-			pitch: number;
 			pos: Vector3;
 			vel: Vector3;
 		},
 	) {
+		// Broadcast new position and rotation to other players
+		const finalPos = state.pos;
+		let encodedYaw =
+			Math.floor(((of.rotation.yaw ?? 0) / (Math.PI * 2)) * 256) % 256;
+		if (encodedYaw < 0) encodedYaw += 256;
+		let encodedPitch =
+			Math.floor(((of.rotation.pitch ?? 0) / (Math.PI * 2)) * 256) % 256;
+		if (encodedPitch < 0) encodedPitch += 256;
+
+		const movePacket = new CPacketEntityPositionAndRotation({
+			id: of.entityId,
+			pos: new PBVector3({
+				x: Math.round(finalPos.x * 32),
+				y: Math.round(finalPos.y * 32),
+				z: Math.round(finalPos.z * 32),
+			}),
+			yaw: encodedYaw,
+			pitch: encodedPitch,
+			onGround: state.onGround,
+		});
 		for (const [existingSid, existing] of this.players) {
 			if (existingSid === of.client.id) continue;
-			// TODO: proper replication
-			// it should send a relative entity movement packet
+
+			existing.client.send(movePacket);
 		}
 	}
 
@@ -383,10 +401,8 @@ export default class GameServer {
 
 			this.replicatePlayerPos(player, {
 				onGround: false,
-				pitch,
 				pos,
 				vel: new Vector3(),
-				yaw,
 			});
 			return;
 		}
@@ -467,7 +483,7 @@ export default class GameServer {
 		);
 
 		this.replicatePlayerPos(player, {
-			onGround: false,
+			onGround: player.physics.onGround,
 			pitch,
 			yaw,
 			pos,
@@ -485,32 +501,6 @@ export default class GameServer {
 				z: pos.z,
 			}),
 		);
-
-		// Broadcast new position and rotation to other players
-		const finalPos = nextPos ?? checkData.lastAuthoritativePos;
-		let encodedYaw = Math.floor(((pl.yaw ?? 0) / (Math.PI * 2)) * 256) % 256;
-		if (encodedYaw < 0) encodedYaw += 256;
-		let encodedPitch =
-			Math.floor(((pl.pitch ?? 0) / (Math.PI * 2)) * 256) % 256;
-		if (encodedPitch < 0) encodedPitch += 256;
-
-		const movePacket = new CPacketEntityPositionAndRotation({
-			id: player.entityId,
-			pos: new PBVector3({
-				x: Math.round(finalPos.x * 32),
-				y: Math.round(finalPos.y * 32),
-				z: Math.round(finalPos.z * 32),
-			}),
-			yaw: encodedYaw,
-			pitch: encodedPitch,
-			onGround: player.physics.onGround,
-		});
-
-		for (const p of this.players.values()) {
-			if (p.client !== cl) {
-				p.client.send(movePacket);
-			}
-		}
 	}
 
 	private handlePosLook(cl: Client, payload: SPacketPlayerPosLook): void {

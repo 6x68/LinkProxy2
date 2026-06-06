@@ -66,6 +66,7 @@ export default class Client extends EventEmitter<ClientEvents> {
 	}
 	/** Disconnects the client with an optional reason, defaulting to `No reason provided`. */
 	disconnect(reason: string = "No reason provided") {
+		console.warn(`[Client] Disconnecting client. Reason: ${reason}`);
 		if (reason)
 			this.send(
 				new CPacketDisconnect({

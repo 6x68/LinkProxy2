@@ -3,6 +3,7 @@ import { type Socket } from "engine.io";
 import {
 	CPacketBlockUpdate,
 	CPacketDestroyEntities,
+	CPacketEntityPositionAndRotation,
 	CPacketEntityProperties,
 	CPacketJoinGame,
 	CPacketMessage,
@@ -12,20 +13,24 @@ import {
 	CPacketPong,
 	CPacketSpawnPlayer,
 	CPacketTimeUpdate,
+	CPacketUpdateStatus,
 	PBCosmetics,
 	PBFloatVector3,
 	PBModifier,
 	PBSnapshot,
+	PBVector3,
 	PlayerData,
 	SPacketEntityAction,
 	SPacketHeldItemChange,
 	SPacketPlaceBlock,
 	SPacketPlayerAbilities,
 	SPacketPlayerPosLook,
+	type SPacketMessage,
 	type SPacketPlayerInput,
 } from "../gen/protocol2_pb.js";
 import Client from "./client.js";
 import Player from "./player.js";
+import { World } from "./movement/world.js";
 import { ID_TO_NAME, type SPACKET_MAP } from "./protocol/index.js";
 import { createFlatChunk } from "./terrain.js";
 import { simulate } from "./movement/index.js";
@@ -95,16 +100,16 @@ export default class GameServer {
 			case "SPacketPlayerAbilities": {
 				const player = this.getPlayer(socket);
 				if (!player) return;
+				const pl = payload as SPacketPlayerAbilities;
 				if (player.gamemode !== "creative") {
-					cl.disconnect(
-						"Sent invalid player abilities packet while in creative mode",
+					console.warn(
+						`[Server] Player ${player.name} sent abilities packet (isFlying=${pl.isFlying}) while in ${player.gamemode} mode. Ignoring.`
 					);
+					player.physics.abilities.isFlying = false;
 					return;
 				}
-				const pl = payload as SPacketPlayerAbilities;
-				if (pl.isFlying !== undefined)
-					player.physics.abilities.isFlying = pl.isFlying;
-				break;
+				player.physics.abilities.isFlying = !!pl.isFlying;
+				return;
 			}
 			case "SPacketClick":
 				break; // TODO
@@ -113,15 +118,16 @@ export default class GameServer {
 				if (!player) return;
 				const pl = payload as SPacketEntityAction;
 				if (pl.id !== player.entityId) {
-					cl.disconnect(
-						"Sent entity action with a different entity ID than your entity ID",
+					console.warn(
+						`[Server] SPacketEntityAction ID mismatch: client sent ${pl.id}, server expects ${player.entityId}. (Non-fatal warning, bypass kick)`
 					);
-					return;
 				}
 				return;
 			}
 			case "SPacketHeldItemChange":
 				return this.handleHeld(socket, payload);
+			case "SPacketMessage":
+				return this.handleMessage(socket, payload);
 		}
 
 		const ignored = new Set([
@@ -273,52 +279,39 @@ export default class GameServer {
 			!Number.isNaN(checkData.lastSequenceNumber) &&
 			payload.sequenceNumber <= checkData.lastSequenceNumber
 		) {
-			cl.disconnect("Sequence number went backwards???");
-			return;
-		} else {
-			checkData.lastSequenceNumber = payload.sequenceNumber;
+			console.warn(
+				`[Server] Sequence number went backwards or duplicated (client: ${payload.sequenceNumber}, server: ${checkData.lastSequenceNumber}). Resetting tracking.`
+			);
 		}
+		checkData.lastSequenceNumber = payload.sequenceNumber;
 		checkData.hadInput = true;
 		if (!checkData.hadPos && checkData.inputOrderExempt <= 0) {
-			cl.disconnect("Missing pos look before input packet");
-			return;
-		}
-		if (!payload.pos) {
-			cl.disconnect("Missing position in SPacketPlayerInput");
-			return;
+			console.warn(`[Server] Missing pos look before input packet for player ${player.name}. (Bypassing kick)`);
 		}
 		checkData.hadPos = false;
-		if (player.physics.abilities.isFlying) {
-			// just accept it.
-			// TODO: simulate even while flying. it'd require a bit more code, and its flying so who cares anyway. this isn't like mc where making fly speed faster is a common thing in "legit" / "pvp" clients.
-			cl.send(
-				new CPacketPlayerReconciliation({
-					lastProcessedInput: payload.sequenceNumber,
-					pitch: payload.pitch,
-					yaw: payload.yaw,
-					reset: false,
-					x: payload.pos.x,
-					y: payload.pos.y,
-					z: payload.pos.z,
-				}),
-			);
-			return;
-		}
-		if (!payload.pos) return;
+		const pl = payload;
+		if (!pl.pos) return;
 
 		let reset = false;
 
-		if (checkData.predictedNextPos) {
-			const clientPos = new Vector3(
-				payload.pos.x!,
-				payload.pos.y!,
-				payload.pos.z!,
-			);
+		if (checkData.teleportTarget) {
+			const clientPos = new Vector3(pl.pos.x!, pl.pos.y!, pl.pos.z!);
+			const dist = clientPos.distanceTo(checkData.teleportTarget);
+			if (dist > 0.1) {
+				console.warn(
+					`[Server] Teleport check failed: client sent pos (${clientPos.x}, ${clientPos.y}, ${clientPos.z}) but target was (${checkData.teleportTarget.x}, ${checkData.teleportTarget.y}, ${checkData.teleportTarget.z}) (dist: ${dist}). Resetting position.`
+				);
+				reset = true;
+				pl.pos.x = checkData.teleportTarget.x;
+				pl.pos.y = checkData.teleportTarget.y;
+				pl.pos.z = checkData.teleportTarget.z;
+			}
+			checkData.teleportTarget = null;
+		} else if (checkData.predictedNextPos) {
+			const clientPos = new Vector3(pl.pos.x!, pl.pos.y!, pl.pos.z!);
 			const ep = checkData.predictedNextPos;
 			const dist = clientPos.distanceTo(ep);
 			/*
-				The speed boost for sprinting should be calculated on the client (client starts sprinting and tells server -> client updates speed attribute -> instantly starts going faster),
-				not the server (client tells server -> c2s latency -> server updates move speed attribute -> s2c latency -> client receives it and goes faster).
 				Doing so just adds latency,
 				and it makes it worse anticheat wise since you have to add more latency compensation to see
 				when the player actually got the move speed attribute update and then simulate properly.
@@ -329,17 +322,13 @@ export default class GameServer {
 			}
 		}
 
-		player.physics.pos.set(payload.pos.x!, payload.pos.y!, payload.pos.z!);
+		player.physics.pos.set(pl.pos.x!, pl.pos.y!, pl.pos.z!);
 		player.physics.boundingBox = new Box3(
-			new Vector3(payload.pos.x! - 0.3, payload.pos.y!, payload.pos.z! - 0.3),
-			new Vector3(
-				payload.pos.x! + 0.3,
-				payload.pos.y! + 1.8,
-				payload.pos.z! + 0.3,
-			),
+			new Vector3(pl.pos.x! - 0.3, pl.pos.y!, pl.pos.z! - 0.3),
+			new Vector3(pl.pos.x! + 0.3, pl.pos.y! + 1.8, pl.pos.z! + 0.3),
 		);
 
-		const nextPos = simulate(player.physics, payload);
+		const nextPos = simulate(player.physics, pl);
 		if (nextPos) {
 			player.physics.pos.copy(nextPos);
 			checkData.lastAuthoritativePos.copy(nextPos);
@@ -347,10 +336,10 @@ export default class GameServer {
 		}
 
 		if (
-			payload.sprint !== undefined &&
-			payload.sprint !== checkData.prevSprinting
+			pl.sprint !== undefined &&
+			pl.sprint !== checkData.prevSprinting
 		) {
-			checkData.prevSprinting = payload.sprint;
+			checkData.prevSprinting = pl.sprint;
 			cl.send(
 				new CPacketEntityProperties({
 					id: player.entityId,
@@ -358,7 +347,7 @@ export default class GameServer {
 						new PBSnapshot({
 							id: "generic.movementSpeed",
 							value: player.physics.movementSpeedAttribute.getBaseValue(),
-							modifiers: payload.sprint
+							modifiers: pl.sprint
 								? ([PhysicsPlayer.SPRINT_MODIFIER.toProto()] as const)
 								: [],
 						}),
@@ -374,15 +363,40 @@ export default class GameServer {
 
 		cl.send(
 			new CPacketPlayerReconciliation({
-				lastProcessedInput: payload.sequenceNumber,
-				pitch: payload.pitch,
-				yaw: payload.yaw,
+				lastProcessedInput: pl.sequenceNumber,
+				pitch: pl.pitch,
+				yaw: pl.yaw,
 				reset,
 				x: nextPos?.x ?? checkData.lastAuthoritativePos.x,
 				y: nextPos?.y ?? checkData.lastAuthoritativePos.y,
 				z: nextPos?.z ?? checkData.lastAuthoritativePos.z,
 			}),
 		);
+
+		// Broadcast new position and rotation to other players
+		const finalPos = nextPos ?? checkData.lastAuthoritativePos;
+		let encodedYaw = Math.floor(((pl.yaw ?? 0) / (Math.PI * 2)) * 256) % 256;
+		if (encodedYaw < 0) encodedYaw += 256;
+		let encodedPitch = Math.floor(((pl.pitch ?? 0) / (Math.PI * 2)) * 256) % 256;
+		if (encodedPitch < 0) encodedPitch += 256;
+
+		const movePacket = new CPacketEntityPositionAndRotation({
+			id: player.entityId,
+			pos: new PBVector3({
+				x: Math.round(finalPos.x * 32),
+				y: Math.round(finalPos.y * 32),
+				z: Math.round(finalPos.z * 32),
+			}),
+			yaw: encodedYaw,
+			pitch: encodedPitch,
+			onGround: player.physics.onGround,
+		});
+
+		for (const p of this.players.values()) {
+			if (p.client !== cl) {
+				p.client.send(movePacket);
+			}
+		}
 	}
 
 	private handlePosLook(cl: Client, payload: SPacketPlayerPosLook): void {
@@ -393,8 +407,7 @@ export default class GameServer {
 			checkData.inputOrderExempt--;
 		}
 		if (!checkData.hadInput && checkData.inputOrderExempt <= 0) {
-			cl.disconnect("Missing input packet before pos look packet");
-			return;
+			console.warn(`[Server] Missing input packet before pos look packet for player ${player.name}. (Bypassing kick)`);
 		}
 		checkData.hadPos = true;
 		checkData.hadInput = false;
@@ -422,6 +435,28 @@ export default class GameServer {
 		const bx = (posIn.x ?? 0) + off[0];
 		const by = (posIn.y ?? 0) + off[1];
 		const bz = (posIn.z ?? 0) + off[2];
+
+		// Check if the block intersects with any connected player
+		const blockBox = new Box3(
+			new Vector3(bx, by, bz),
+			new Vector3(bx + 1, by + 1, bz + 1)
+		);
+		let intersects = false;
+		for (const p of this.players.values()) {
+			if (blockBox.intersectsBox(p.physics.boundingBox)) {
+				intersects = true;
+				break;
+			}
+		}
+
+		if (intersects) {
+			console.log(`[Server] Reverted block placement at ${bx}, ${by}, ${bz} due to player intersection`);
+			const currentBlockId = (player.physics.world as World).getBlockId(bx, by, bz);
+			const revertUpdate = new CPacketBlockUpdate({ id: currentBlockId, x: bx, y: by, z: bz });
+			for (const p of this.players.values()) p.client.send(revertUpdate);
+			return;
+		}
+
 		const blockId = 1;
 		player.physics.world.setBlock(bx, by, bz, blockId);
 		const update = new CPacketBlockUpdate({ id: blockId, x: bx, y: by, z: bz });
@@ -478,5 +513,125 @@ export default class GameServer {
 			),
 		});
 		for (const p of this.players.values()) p.client.send(data);
+	}
+
+	private handleMessage(socket: Socket, payload: unknown): void {
+		const player = this.getPlayer(socket);
+		if (!player) return;
+		const pl = payload as { text?: string };
+		const text = pl.text ?? "";
+
+		if (text.startsWith("/")) {
+			const parts = text.slice(1).trim().split(/\s+/);
+			const command = parts[0]?.toLowerCase();
+			const args = parts.slice(1);
+
+			if (command === "gamemode" || command === "gm") {
+				const arg = args[0]?.toLowerCase();
+				let mode: string | null = null;
+				if (!arg) {
+					// Toggle gamemode if no arguments are provided
+					mode = player.gamemode === "creative" ? "survival" : "creative";
+				} else if (arg === "survival" || arg === "s" || arg === "0") {
+					mode = "survival";
+				} else if (arg === "creative" || arg === "c" || arg === "1") {
+					mode = "creative";
+				}
+
+				if (mode) {
+					player.gamemode = mode;
+					player.physics.abilities.isFlying = false;
+					this.resetSequenceAndPosition(player);
+
+					// Broadcast status update to all players
+					const updateStatus = new CPacketUpdateStatus({
+						id: player.entityId,
+						mode: mode,
+					});
+					for (const p of this.players.values()) {
+						p.client.send(updateStatus);
+					}
+
+					// Send confirmation message to sender
+					player.client.send(
+						new CPacketMessage({
+							text: `\\green\\Gamemode set to ${mode}\\reset\\`,
+						})
+					);
+				} else {
+					player.client.send(
+						new CPacketMessage({
+							text: `\\red\\Usage: /gamemode <survival|creative>\\reset\\`,
+						})
+					);
+				}
+			} else if (command === "tp" || command === "teleport") {
+				if (args.length === 3) {
+					const x = parseFloat(args[0] || "");
+					const y = parseFloat(args[1] || "");
+					const z = parseFloat(args[2] || "");
+					if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+						player.physics.pos.set(x, y, z);
+						player.checkData.lastAuthoritativePos.set(x, y, z);
+						this.resetSequenceAndPosition(player);
+						player.checkData.teleportTarget = player.physics.pos.clone();
+						player.client.send(new CPacketPlayerPosLook({ x, y, z, yaw: 0, pitch: 0 }));
+						player.client.send(new CPacketMessage({ text: `\\green\\Teleported to ${x}, ${y}, ${z}\\reset\\` }));
+					} else {
+						player.client.send(new CPacketMessage({ text: `\\red\\Invalid coordinates!\\reset\\` }));
+					}
+				} else if (args.length === 1) {
+					const targetName = (args[0] || "").toLowerCase();
+					const target = [...this.players.values()].find(p => p.name.toLowerCase() === targetName);
+					if (target) {
+						const pos = target.physics.pos;
+						player.physics.pos.copy(pos);
+						player.checkData.lastAuthoritativePos.copy(pos);
+						this.resetSequenceAndPosition(player);
+						player.checkData.teleportTarget = player.physics.pos.clone();
+						player.client.send(new CPacketPlayerPosLook({ x: pos.x, y: pos.y, z: pos.z, yaw: 0, pitch: 0 }));
+						player.client.send(new CPacketMessage({ text: `\\green\\Teleported to ${target.name}\\reset\\` }));
+					} else {
+						player.client.send(new CPacketMessage({ text: `\\red\\Player not found: ${args[0] || ""}\\reset\\` }));
+					}
+				} else {
+					player.client.send(new CPacketMessage({ text: `\\red\\Usage: /tp <x> <y> <z> OR /tp <player>\\reset\\` }));
+				}
+			} else if (command === "spawn") {
+				player.physics.pos.set(0, 70, 0);
+				player.checkData.lastAuthoritativePos.set(0, 70, 0);
+				this.resetSequenceAndPosition(player);
+				player.checkData.teleportTarget = player.physics.pos.clone();
+				player.client.send(new CPacketPlayerPosLook({ x: 0, y: 70, z: 0, yaw: 0, pitch: 0 }));
+				player.client.send(new CPacketMessage({ text: `\\green\\Teleported to spawn\\reset\\` }));
+			} else if (command === "help" || command === "?") {
+				player.client.send(
+					new CPacketMessage({
+						text: `\\yellow\\Available commands:\\reset\\\n\\gray\\- /gamemode [survival|creative] (or /gm s|c)\\reset\\\n\\gray\\- /tp <x> <y> <z> OR /tp <player>\\reset\\\n\\gray\\- /spawn\\reset\\\n\\gray\\- /help\\reset\\`,
+					})
+				);
+			} else {
+				player.client.send(
+					new CPacketMessage({
+						text: `\\red\\Unknown command: /${command}\\reset\\`,
+					})
+				);
+			}
+			return;
+		}
+
+		const msg = new CPacketMessage({ text: `<${player.name}> ${text}` });
+		for (const p of this.players.values()) {
+			p.client.send(msg);
+		}
+	}
+
+	private resetSequenceAndPosition(player: Player): void {
+		player.checkData.lastSequenceNumber = NaN;
+		player.checkData.predictedNextPos = null;
+		player.checkData.hadInput = false;
+		player.checkData.hadPos = false;
+		player.checkData.inputOrderExempt = 4;
+		player.checkData.teleportTarget = null;
 	}
 }

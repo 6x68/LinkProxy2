@@ -5,7 +5,6 @@ import {
 	CPacketDestroyEntities,
 	CPacketEntityPositionAndRotation,
 	CPacketEntityProperties,
-	CPacketEntityRelativePositionAndRotation,
 	CPacketJoinGame,
 	CPacketMessage,
 	CPacketPlayerList,
@@ -27,10 +26,8 @@ import {
 	SPacketPlaceBlock,
 	SPacketPlayerAbilities,
 	SPacketPlayerPosLook,
-	type SPacketMessage,
 	type SPacketPlayerInput,
 	SPacketUseEntity,
-	SPacketRespawn,
 	SPacketUpdateInventory,
 	SPacketClickWindow,
 	CPacketUpdateHealth,
@@ -49,15 +46,6 @@ import { createFlatChunk } from "./terrain.js";
 import { simulate } from "./movement/index.js";
 import { PhysicsPlayer } from "./movement/move.js";
 import Rotation from "./rotation.js";
-import {
-	DirectionString,
-	EnumFacing,
-	fromProto,
-	fromProtoString,
-	opposite,
-	playerBlockRayTrace,
-} from "./movement/raytrace.js";
-import { World } from "./movement/world.js";
 
 const FACE_OFFSET: Record<string, [number, number, number]> = {
 	DOWN: [0, 1, 0],
@@ -484,8 +472,6 @@ export default class GameServer {
 
 		this.replicatePlayerPos(player, {
 			onGround: player.physics.onGround,
-			pitch,
-			yaw,
 			pos,
 			vel: new Vector3(),
 		});
@@ -606,21 +592,23 @@ export default class GameServer {
 		)
 			return cancel("wrong hit vec");*/
 		// #endregion
-		// Check if the block intersects with any connected player
+
 		const blockBox = new Box3(
 			new Vector3(bx, by, bz),
 			new Vector3(bx + 1, by + 1, bz + 1),
 		);
-		let intersects = false;
 		for (const p of this.players.values()) {
-			if (blockBox.intersectsBox(p.physics.boundingBox)) {
-				intersects = true;
-				break;
+			const bb = p.physics.boundingBox;
+			if (
+				bb.max.x > blockBox.min.x &&
+				bb.min.x < blockBox.max.x &&
+				bb.max.y > blockBox.min.y &&
+				bb.min.y < blockBox.max.y &&
+				bb.max.z > blockBox.min.z &&
+				bb.min.z < blockBox.max.z
+			) {
+				return cancel("block intersecting with a player");
 			}
-		}
-
-		if (intersects) {
-			return cancel("block intersecting with a player");
 		}
 
 		// Get block ID from selected hotbar slot item
@@ -657,15 +645,17 @@ export default class GameServer {
 		player.heldSlot = payload.slot ?? 0;
 	}
 
-	private handleUpdateInventory(socket: Socket, payload: unknown): void {
+	private handleUpdateInventory(
+		socket: Socket,
+		payload: SPacketUpdateInventory,
+	): void {
 		const player = this.getPlayer(socket);
 		if (!player) return;
 		console.log(
 			`[Server] handleUpdateInventory: player=${player.name}, payload=${JSON.stringify(payload)}`,
 		);
-		const pkt = payload as SPacketUpdateInventory;
-		if (pkt.main) {
-			player.inventory.items = pkt.main;
+		if (payload.main) {
+			player.inventory.items = payload.main;
 		}
 	}
 
@@ -1120,7 +1110,6 @@ export default class GameServer {
 		player.checkData.predictedNextPos = null;
 		player.checkData.hadInput = false;
 		player.checkData.hadPos = false;
-		player.checkData.inputOrderExempt = 4;
 		player.checkData.teleportTarget = null;
 	}
 }

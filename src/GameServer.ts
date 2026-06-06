@@ -107,14 +107,6 @@ export default class GameServer {
 		const name = ID_TO_NAME[id] as keyof typeof SPACKET_MAP | undefined;
 		if (!name) return;
 
-		if (
-			name !== "SPacketPlayerInput" &&
-			name !== "SPacketPlayerPosLook" &&
-			name !== "SPacketPing"
-		) {
-			console.log(`[Server] Packet received: ${name}`, JSON.stringify(payload));
-		}
-
 		switch (name) {
 			case "SPacketLoginStart":
 				return this.handleLogin(cl, payload);
@@ -154,6 +146,7 @@ export default class GameServer {
 					cl.disconnect(
 						"An entities ID was sent in SPacketEntityAction the that wasn't yours",
 					);
+					return;
 				}
 				return;
 			}
@@ -177,6 +170,7 @@ export default class GameServer {
 			"SPacketEnchantItem",
 			"SPacketOpenShop",
 			"SPacketQueueNext",
+			"SPacketAnalytics",
 		]);
 		if (!ignored.has(name)) {
 			console.warn("[Server] Unhandled:", name, payload);
@@ -350,6 +344,10 @@ export default class GameServer {
 			console.warn(
 				`[Server] Missing pos look before input packet for player ${player.name}. (Bypassing kick)`,
 			);
+		}
+		if (!payload.pos) {
+			cl.disconnect("Missing pos in SPacketPlayerInput");
+			return;
 		}
 		player.checkData.lastClientPos = new Vector3(
 			payload.pos.x,

@@ -33,6 +33,7 @@ export default class Player {
 		predictedNextPos: null as Vector3 | null,
 		lastSequenceNumber: NaN,
 		prevSprinting: false,
+		teleportTarget: null as Vector3 | null,
 	};
 	readonly socketId: string;
 

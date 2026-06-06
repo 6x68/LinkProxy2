@@ -23,6 +23,9 @@ export default class Client extends EventEmitter<ClientEvents> {
 		this.#socket.on("close", (a) => this.emit("close", a));
 		this.id = (socket as unknown as Omit<Socket, "id"> & { id: string }).id;
 	}
+	get socket(): Socket {
+		return this.#socket;
+	}
 	/** Handles data coming from the client. This is always MsgPack (Protobuf object -> object.toJSON -> MsgPack -> Sent), so we don't need anything else. */
 	#onData(
 		data:
@@ -69,6 +72,7 @@ export default class Client extends EventEmitter<ClientEvents> {
 	}
 	/** Disconnects the client with an optional reason, defaulting to `No reason provided`. */
 	disconnect(reason: string = "No reason provided") {
+		console.warn(`[Client] Disconnecting client. Reason: ${reason}`);
 		if (reason)
 			this.send(
 				new CPacketDisconnect({

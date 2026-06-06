@@ -661,7 +661,9 @@ export class PhysicsPlayer {
 			this.motion.y = this.getLadderSpeed();
 		}
 
-		this.motion.y -= 0.08;
+		if (!this.abilities.isFlying) {
+			this.motion.y -= 0.08;
+		}
 		this.motion.y *= 0.98;
 
 		this.motion.x *= friction;

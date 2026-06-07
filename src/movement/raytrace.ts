@@ -2,7 +2,6 @@ import { Vector3 } from "three";
 import BlockPos from "./BlockPos.js";
 import type { BlockState } from "./blockstate.js";
 import { PhysicsWorld } from "./move.js";
-import { PBEnumFacing } from "../../gen/common_pb.js";
 
 export enum EnumFacing {
 	DOWN = 0,
@@ -11,44 +10,6 @@ export enum EnumFacing {
 	SOUTH = 3,
 	WEST = 4,
 	EAST = 5,
-}
-const proto2ef = {
-	[PBEnumFacing.DOWN]: EnumFacing.DOWN,
-	[PBEnumFacing.UP]: EnumFacing.UP,
-	[PBEnumFacing.EAST]: EnumFacing.EAST,
-	[PBEnumFacing.NORTH]: EnumFacing.NORTH,
-	[PBEnumFacing.SOUTH]: EnumFacing.SOUTH,
-	[PBEnumFacing.WEST]: EnumFacing.WEST,
-	[PBEnumFacing.UNDEFINED_FACE]: undefined,
-} satisfies Record<PBEnumFacing, EnumFacing | undefined>;
-
-export function fromProto(pb: PBEnumFacing.UNDEFINED_FACE): undefined;
-export function fromProto(pb: PBEnumFacing): EnumFacing;
-export function fromProto(pb: PBEnumFacing): EnumFacing | undefined {
-	return proto2ef[pb];
-}
-
-export type DirectionString = keyof typeof EnumFacing;
-
-const psf2ef = {
-	DOWN: EnumFacing.DOWN,
-	UP: EnumFacing.UP,
-	EAST: EnumFacing.EAST,
-	NORTH: EnumFacing.NORTH,
-	SOUTH: EnumFacing.SOUTH,
-	WEST: EnumFacing.WEST,
-} satisfies Record<DirectionString, EnumFacing>;
-export const opposite = {
-	[EnumFacing.DOWN]: EnumFacing.UP,
-	[EnumFacing.UP]: EnumFacing.DOWN,
-	[EnumFacing.NORTH]: EnumFacing.SOUTH,
-	[EnumFacing.SOUTH]: EnumFacing.NORTH,
-	[EnumFacing.WEST]: EnumFacing.EAST,
-	[EnumFacing.EAST]: EnumFacing.WEST,
-} satisfies Record<EnumFacing, EnumFacing>;
-
-export function fromProtoString(s: DirectionString): EnumFacing {
-	return psf2ef[s];
 }
 
 export enum TypeOfHit {

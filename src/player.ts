@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { Vector3 } from "three";
 import type Client from "./client.js";
+import type { SPacketPlaceBlock } from "../gen/protocol2_pb.js";
 import { PhysicsPlayer } from "./movement/move.js";
 import { World } from "./movement/world.js";
 import Inventory from "./inventory.js";
@@ -34,6 +35,12 @@ export default class Player {
 		lastSequenceNumber: NaN,
 		prevSprinting: false,
 		teleportTarget: null as Vector3 | null,
+		pendingPlacement: null as {
+			payload: SPacketPlaceBlock;
+			bx: number;
+			by: number;
+			bz: number;
+		} | null,
 	};
 	readonly socketId: string;
 

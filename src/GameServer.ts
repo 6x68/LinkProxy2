@@ -37,7 +37,7 @@ import {
 	CPacketSoundEffect,
 	CPacketRespawn,
 } from "../gen/protocol2_pb.js";
-import { SPacketUseEntity_Action } from "../gen/common_pb.js";
+import { PBEnumFacing, SPacketUseEntity_Action } from "../gen/common_pb.js";
 import Client from "./client.js";
 import Player from "./player.js";
 import { World } from "./movement/world.js";
@@ -47,22 +47,9 @@ import { simulate } from "./movement/index.js";
 import { PhysicsPlayer } from "./movement/move.js";
 import Rotation from "./rotation.js";
 import {
-	DirectionString,
 	EnumFacing,
-	fromProto,
-	fromProtoString,
-	opposite,
 	playerBlockRayTrace,
 } from "./movement/raytrace.js";
-
-const FACE_OFFSET: Record<string, [number, number, number]> = {
-	DOWN: [0, 1, 0],
-	UP: [0, 0, -1],
-	NORTH: [0, 0, 1],
-	SOUTH: [-1, 0, 0],
-	WEST: [1, 0, 0],
-	UNDEFINED_FACE: [0, -1, 0],
-};
 
 export default class GameServer {
 	private players = new Map<string, Player>();
@@ -373,6 +360,7 @@ export default class GameServer {
 		if (!pl.pos) return;
 		player.rotation.yaw = yaw;
 		player.rotation.pitch = pitch;
+		this.tryCompletePlacement(player);
 
 		let reset = false;
 
@@ -480,6 +468,7 @@ export default class GameServer {
 			payload.yaw ?? player.rotation.yaw,
 			payload.pitch ?? player.rotation.pitch,
 		);
+		this.tryCompletePlacement(player);
 		if (checkData.inputOrderExempt > 0) {
 			checkData.inputOrderExempt--;
 		}
@@ -504,6 +493,7 @@ export default class GameServer {
 		const posIn = payload.positionIn;
 		if (!posIn) return;
 		const side = payload.side;
+		if (side == null) return;
 		const NUM_OFFSET: [number, number, number][] = [
 			[0, -1, 0], // client DOWN  (index 0)
 			[0, 1, 0], // client UP    (index 1)
@@ -512,26 +502,42 @@ export default class GameServer {
 			[-1, 0, 0], // client WEST  (index 4)
 			[1, 0, 0], // client EAST  (index 5)
 		];
-		const off =
-			typeof side === "string"
-				? (FACE_OFFSET[side] ?? [0, 0, 0])
-				: (NUM_OFFSET[side as number] ?? [0, 0, 0]);
+		const pbFacing = typeof side === "string"
+			? (PBEnumFacing as unknown as Record<string, number>)[side] ?? 0
+			: side;
+		const off = NUM_OFFSET[pbFacing] ?? [0, 0, 0];
 		const bx = (posIn.x ?? 0) + off[0];
 		const by = (posIn.y ?? 0) + off[1];
 		const bz = (posIn.z ?? 0) + off[2];
 
+		player.checkData.pendingPlacement = { payload, bx, by, bz };
+	}
+
+	private tryCompletePlacement(player: Player): void {
+		const pending = player.checkData.pendingPlacement;
+		if (!pending) return;
+		player.checkData.pendingPlacement = null;
+
+		const { payload, bx, by, bz } = pending;
+		const posIn = payload.positionIn;
+		if (!posIn) return;
+		const side = payload.side;
+		if (!side) return;
+
+		const world = player.physics.world;
+
 		function cancel(reason?: string) {
-			if (player === undefined) return;
 			if (reason)
 				player.client.send(
 					new CPacketMessage({
 						text: `Cancel block placement: ${reason}`,
 					}),
 				);
-			const air = new CPacketBlockUpdate({ id: 0, x: bx, y: by, z: bz });
-			player.client.send(air);
+			player.client.send(
+				new CPacketBlockUpdate({ id: 0, x: bx, y: by, z: bz }),
+			);
 		}
-		if (!side) return;
+
 		// #region Validations
 		const trace = playerBlockRayTrace(
 			{
@@ -547,12 +553,13 @@ export default class GameServer {
 					return new Vector3(x, y, z).normalize();
 				},
 			},
-			this.world,
+			world,
 			4.5,
 		);
 		if (trace === null) return cancel("trace === null");
-		const realSide =
-			opposite[fromProtoString(side as unknown as DirectionString)];
+		const realSide = typeof side === "string"
+			? (PBEnumFacing as unknown as Record<string, number>)[side]
+			: side;
 		if (realSide === undefined) return cancel("undefined side");
 		if (
 			trace.block?.x !== posIn.x ||
@@ -562,21 +569,11 @@ export default class GameServer {
 			return cancel("traced block pos doesn't match");
 		if (trace.side !== realSide)
 			return cancel(
-				`traced side ${EnumFacing[trace.side]} !== client side ${EnumFacing[realSide]}`,
+				`traced side (${EnumFacing[trace.side]}) !== client side (${EnumFacing[realSide]})`,
 			);
-
-		const EPS = 0.5;
-		if (
-			payload.hitX !== undefined &&
-			payload.hitY !== undefined &&
-			payload.hitZ !== undefined &&
-			(Math.abs(trace.hitVec.x - (posIn.x ?? 0) - payload.hitX) > EPS ||
-				Math.abs(trace.hitVec.y - (posIn.y ?? 0) - payload.hitY) > EPS ||
-				Math.abs(trace.hitVec.z - (posIn.z ?? 0) - payload.hitZ) > EPS)
-		)
-			return cancel("wrong hit vec");
 		// #endregion
 
+		// Check if the block intersects with any connected player (strict: touching faces is OK)
 		const blockBox = new Box3(
 			new Vector3(bx, by, bz),
 			new Vector3(bx + 1, by + 1, bz + 1),
@@ -591,7 +588,10 @@ export default class GameServer {
 				bb.max.z > blockBox.min.z &&
 				bb.min.z < blockBox.max.z
 			) {
-				return; // normal clients simulate this properly and don't allow this to happen, they still send the packet that does this anyway.
+				player.client.send(
+					new CPacketBlockUpdate({ id: 0, x: bx, y: by, z: bz }),
+				);
+				return;
 			}
 		}
 
@@ -602,7 +602,7 @@ export default class GameServer {
 				? heldItem.id
 				: 1;
 
-		player.physics.world.setBlock(bx, by, bz, blockId);
+		world.setBlock(bx, by, bz, blockId);
 		const update = new CPacketBlockUpdate({ id: blockId, x: bx, y: by, z: bz });
 		for (const p of this.players.values()) p.client.send(update);
 	}

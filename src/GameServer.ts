@@ -1,4 +1,4 @@
-import { Box3, Vector3 } from "three";
+import { Box3, Vector3, Ray } from "three";
 import { type Socket } from "engine.io";
 import {
 	CPacketBlockUpdate,
@@ -28,6 +28,9 @@ import {
 	SPacketPlayerPosLook,
 	type SPacketPlayerInput,
 	SPacketUseEntity,
+	SPacketPlayerAction,
+	SPacketUseItem,
+	SPacketRespawn,
 	SPacketUpdateInventory,
 	SPacketClickWindow,
 	CPacketUpdateHealth,
@@ -49,7 +52,17 @@ import Rotation from "./rotation.js";
 import {
 	EnumFacing,
 	playerBlockRayTrace,
+	TypeOfHit,
+	rayTraceBlocks,
 } from "./movement/raytrace.js";
+
+
+function getAngleDiff(a: number, b: number): number {
+	let diff = a - b;
+	while (diff < -Math.PI) diff += Math.PI * 2;
+	while (diff > Math.PI) diff -= Math.PI * 2;
+	return Math.abs(diff);
+}
 
 export default class GameServer {
 	private players = new Map<string, Player>();
@@ -139,6 +152,31 @@ export default class GameServer {
 				return this.handleMessage(socket, payload);
 			case "SPacketUseEntity":
 				return this.handleUseEntity(socket, payload);
+			case "SPacketUseItem": {
+				const player = this.getPlayer(socket);
+				if (player) {
+					player.checkData.lastBlockTime = Date.now();
+				}
+				return;
+			}
+			case "SPacketPlayerAction": {
+				const player = this.getPlayer(socket);
+				if (player) {
+					const pl = payload as SPacketPlayerAction;
+					if (pl.action === 5 /* RELEASE_USE_ITEM */) {
+						player.checkData.lastUnblockTime = Date.now();
+						const blockTime = player.checkData.lastBlockTime;
+						const attackTime = player.checkData.lastAttackTime;
+						const now = Date.now();
+						if (blockTime && attackTime && now - blockTime < 15 && now - attackTime < 15 && attackTime >= blockTime) {
+							console.warn(`[Anti-Cheat] AutoBlock detected for player ${player.name}! Sequence: Block (${now - blockTime}ms ago) -> Attack (${now - attackTime}ms ago) -> Unblock.`);
+							player.client.disconnect("AutoBlock/Kill Aura detected");
+							return;
+						}
+					}
+				}
+				return;
+			}
 			case "SPacketRespawn":
 				return this.handleRespawn(socket);
 			case "SPacketUpdateInventory":
@@ -358,6 +396,66 @@ export default class GameServer {
 		checkData.hadPos = false;
 		const pl = payload;
 		if (!pl.pos) return;
+		// Push to rotation history
+		const now = Date.now();
+		const attacked = (now - checkData.lastAttackTime < 100);
+		checkData.rotationHistory.push({ yaw, pitch, time: now, attacked });
+		if (checkData.rotationHistory.length > 8) {
+			checkData.rotationHistory.shift();
+		}
+
+		// Silent Aimbot / Kill Aura rotation spike check
+		const history = checkData.rotationHistory;
+		for (let i = 1; i < history.length - 1; i++) {
+			const current = history[i];
+			if (current && current.attacked) {
+				for (let j = 0; j < i; j++) {
+					const pre = history[j];
+					for (let k = i + 1; k < history.length; k++) {
+						const post = history[k];
+						if (pre && post && post.time - pre.time <= 250) {
+							const snapTo = getAngleDiff(current.yaw, pre.yaw);
+							const snapBack = getAngleDiff(post.yaw, current.yaw);
+							const overallDiff = getAngleDiff(post.yaw, pre.yaw);
+
+							if (snapTo > 0.6 && snapBack > 0.6 && overallDiff < 0.2) {
+								console.warn(
+									`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Rotation spike: ${pre.yaw.toFixed(2)} -> ${current.yaw.toFixed(2)} -> ${post.yaw.toFixed(2)}.`
+								);
+								cl.disconnect("Silent Aimbot/Kill Aura detected");
+								return;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Check for silent aimbot / snap back
+		if (checkData.wasSnapAttack && now - checkData.lastAttackTime < 100) {
+			let diffBack = yaw - checkData.snapBackYaw;
+			while (diffBack < -Math.PI) diffBack += Math.PI * 2;
+			while (diffBack > Math.PI) diffBack -= Math.PI * 2;
+			diffBack = Math.abs(diffBack);
+
+			if (diffBack < 0.15) {
+				console.warn(`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Snapped back to ${checkData.snapBackYaw.toFixed(2)}.`);
+				cl.disconnect("Silent Aimbot/Kill Aura detected");
+				return;
+			}
+		}
+		checkData.wasSnapAttack = false;
+
+		// Smooth camera tracking to identify legit viewing yaw
+		let diffYaw = yaw - player.rotation.yaw;
+		while (diffYaw < -Math.PI) diffYaw += Math.PI * 2;
+		while (diffYaw > Math.PI) diffYaw -= Math.PI * 2;
+		diffYaw = Math.abs(diffYaw);
+
+		if (diffYaw < 0.5) {
+			checkData.lastLegitYaw = yaw;
+		}
+
 		player.rotation.yaw = yaw;
 		player.rotation.pitch = pitch;
 		this.tryCompletePlacement(player);
@@ -464,10 +562,61 @@ export default class GameServer {
 		const player = [...this.players.values()].find((p) => p.client === cl);
 		if (!player) return;
 		const { checkData } = player;
-		player.rotation.set(
-			payload.yaw ?? player.rotation.yaw,
-			payload.pitch ?? player.rotation.pitch,
-		);
+		const yaw = payload.yaw ?? player.rotation.yaw;
+		const pitch = payload.pitch ?? player.rotation.pitch;
+
+		// Push to rotation history
+		const now = Date.now();
+		const attacked = (now - checkData.lastAttackTime < 100);
+		checkData.rotationHistory.push({ yaw, pitch, time: now, attacked });
+		if (checkData.rotationHistory.length > 8) {
+			checkData.rotationHistory.shift();
+		}
+
+		// Silent Aimbot / Kill Aura rotation spike check
+		const history = checkData.rotationHistory;
+		for (let i = 1; i < history.length - 1; i++) {
+			const current = history[i];
+			if (current && current.attacked) {
+				for (let j = 0; j < i; j++) {
+					const pre = history[j];
+					for (let k = i + 1; k < history.length; k++) {
+						const post = history[k];
+						if (pre && post && post.time - pre.time <= 250) {
+							const snapTo = getAngleDiff(current.yaw, pre.yaw);
+							const snapBack = getAngleDiff(post.yaw, current.yaw);
+							const overallDiff = getAngleDiff(post.yaw, pre.yaw);
+
+							if (snapTo > 0.6 && snapBack > 0.6 && overallDiff < 0.2) {
+								console.warn(
+									`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Rotation spike: ${pre.yaw.toFixed(2)} -> ${current.yaw.toFixed(2)} -> ${post.yaw.toFixed(2)}.`
+								);
+								cl.disconnect("Silent Aimbot/Kill Aura detected");
+								return;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Check for silent aimbot / snap back
+		if (checkData.wasSnapAttack && now - checkData.lastAttackTime < 100) {
+			const diffBack = Math.abs(yaw - checkData.snapBackYaw);
+			let normDiff = diffBack;
+			while (normDiff < -Math.PI) normDiff += Math.PI * 2;
+			while (normDiff > Math.PI) normDiff -= Math.PI * 2;
+			normDiff = Math.abs(normDiff);
+
+			if (normDiff < 0.15) {
+				console.warn(`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Snapped back to ${checkData.snapBackYaw.toFixed(2)}.`);
+				cl.disconnect("Silent Aimbot/Kill Aura detected");
+				return;
+			}
+		}
+		checkData.wasSnapAttack = false;
+
+		player.rotation.set(yaw, pitch);
 		this.tryCompletePlacement(player);
 		if (checkData.inputOrderExempt > 0) {
 			checkData.inputOrderExempt--;
@@ -863,11 +1012,73 @@ export default class GameServer {
 			return;
 		}
 
+		// Self-Attack Check
+		if (pkt.id === attacker.entityId) {
+			console.warn(`[Server] Combat: Attack rejected because ${attacker.name} tried to attack themselves`);
+			return;
+		}
+
+		// Attacker Dead Check
+		if (attacker.health <= 0) {
+			console.log(`[Server] Combat: Attack rejected because attacker ${attacker.name} is dead`);
+			return;
+		}
+
+		// Click Rate Limit check (max 20 clicks/second)
+		const now = Date.now();
+		if (attacker.checkData.lastAttackTime && now - attacker.checkData.lastAttackTime < 50) {
+			console.log(`[Server] Combat: Attack rejected from ${attacker.name} due to click rate limiting`);
+			return;
+		}
+		attacker.checkData.lastAttackTime = now;
+
 		// Find the target player
 		const target = [...this.players.values()].find(
 			(p) => p.entityId === pkt.id,
 		);
 		if (!target) return;
+
+		// Multi-Target KillAura check
+		if (attacker.checkData.lastAttackedEntityId !== null && attacker.checkData.lastAttackedEntityId !== pkt.id) {
+			const timeDiff = now - attacker.checkData.lastAttackTime;
+			if (timeDiff < 80) {
+				console.warn(`[Anti-Cheat] Multi-Target KillAura detected for player ${attacker.name}! Attacked different entities (${attacker.checkData.lastAttackedEntityId} and ${pkt.id}) in ${timeDiff}ms.`);
+				attacker.client.disconnect("Multi-Target KillAura detected");
+				return;
+			}
+		}
+		attacker.checkData.lastAttackedEntityId = pkt.id;
+
+		// Rotation snapping (Silent Aimbot/Aura check)
+		const history = attacker.checkData.rotationHistory;
+		// Mark any recent rotation history entries within 100ms as attacked
+		for (const entry of history) {
+			if (now - entry.time < 100) {
+				entry.attacked = true;
+			}
+		}
+
+		if (history.length >= 2) {
+			const prevRot = history[history.length - 2];
+			if (prevRot) {
+				let diffYaw = attacker.rotation.yaw - prevRot.yaw;
+				while (diffYaw < -Math.PI) diffYaw += Math.PI * 2;
+				while (diffYaw > Math.PI) diffYaw -= Math.PI * 2;
+				diffYaw = Math.abs(diffYaw);
+
+				if (diffYaw > 0.8) {
+					// Attacker snapped by > 45 degrees to attack. Flag it and check if they snap back next tick.
+					attacker.checkData.wasSnapAttack = true;
+					attacker.checkData.snapBackYaw = prevRot.yaw;
+				}
+			}
+		}
+
+		// Target hurt invulnerability cooldown (10 ticks / 450ms)
+		if (target.checkData.lastHurtTime && now - target.checkData.lastHurtTime < 450) {
+			console.log(`[Server] Combat: Attack ignored from ${attacker.name} to ${target.name} due to target invulnerability`);
+			return;
+		}
 
 		// 1. Distance check (max 4.5 blocks range)
 		const dist = attacker.physics.pos.distanceTo(target.physics.pos);
@@ -878,18 +1089,96 @@ export default class GameServer {
 			return;
 		}
 
-		// 2. Creative mode check
+		// 2. Look Raycast Check (anti-KillAura/Aimbot)
+		const eyePos = attacker.physics.pos.clone().setY(attacker.physics.pos.y + attacker.physics.eyeHeight);
+		const targetCenter = target.physics.boundingBox.getCenter(new Vector3());
+
+		const pitchCos = Math.cos(attacker.rotation.pitch);
+		const look = new Vector3(
+			-Math.sin(attacker.rotation.yaw) * pitchCos,
+			Math.sin(attacker.rotation.pitch),
+			-Math.cos(attacker.rotation.yaw) * pitchCos
+		).normalize();
+
+		const ray = new Ray(eyePos, look);
+		// Expand the target's bounding box by a scalar tolerance (e.g. 0.4 blocks) to allow for latency/sync lag
+		const expandedBox = target.physics.boundingBox.clone().expandByScalar(0.4);
+		const hitPoint = new Vector3();
+		const rayHit = ray.intersectBox(expandedBox, hitPoint);
+
+		// Lock-on perfect-aimbot tracking detection
+		// Still check mathematical angle difference for perfect center tracking
+		const dx = targetCenter.x - eyePos.x;
+		const dy = targetCenter.y - eyePos.y;
+		const dz = targetCenter.z - eyePos.z;
+		const dh = Math.sqrt(dx * dx + dz * dz);
+		let targetYaw = Math.atan2(-dx, -dz);
+		let targetPitch = -Math.atan2(dy, dh);
+		let diffYaw = attacker.rotation.yaw - targetYaw;
+		while (diffYaw < -Math.PI) diffYaw += Math.PI * 2;
+		while (diffYaw > Math.PI) diffYaw -= Math.PI * 2;
+		let diffPitch = attacker.rotation.pitch - targetPitch;
+		const angleDiff = Math.sqrt(diffYaw * diffYaw + diffPitch * diffPitch);
+
+		if (angleDiff < 0.005) {
+			attacker.checkData.consecutivePerfectHits = (attacker.checkData.consecutivePerfectHits || 0) + 1;
+			if (attacker.checkData.consecutivePerfectHits >= 4) {
+				console.warn(`[Anti-Cheat] Perfect lock-on aimbot tracking detected for player ${attacker.name}!`);
+				attacker.client.disconnect("Aimbot/Kill Aura detected");
+				return;
+			}
+		} else {
+			attacker.checkData.consecutivePerfectHits = 0;
+		}
+
+		if (rayHit === null) {
+			attacker.checkData.failedAngleAttacks++;
+			console.log(
+				`[Server] Combat: Attack rejected from ${attacker.name} to ${target.name} due to raycast (look ray missed bounding box)`
+			);
+			if (attacker.checkData.failedAngleAttacks >= 5) {
+				console.warn(`[Anti-Cheat] Raycast KillAura detected for player ${attacker.name}! (Failed ${attacker.checkData.failedAngleAttacks} consecutive attacks)`);
+				attacker.client.disconnect("Aimbot/Kill Aura detected");
+			}
+			return;
+		}
+		attacker.checkData.failedAngleAttacks = 0;
+
+		// 3. Line of Sight Raytrace Check (anti-WallHack)
+		const targetFeet = target.physics.pos.clone();
+		const targetEye = targetFeet.clone().setY(targetFeet.y + target.physics.eyeHeight);
+
+		const hitCenter = rayTraceBlocks(eyePos, targetCenter, false, true, false, attacker.physics.world);
+		const hitFeet = rayTraceBlocks(eyePos, targetFeet, false, true, false, attacker.physics.world);
+		const hitEye = rayTraceBlocks(eyePos, targetEye, false, true, false, attacker.physics.world);
+
+		const blockedCenter = hitCenter && hitCenter.typeOfHit === TypeOfHit.BLOCK;
+		const blockedFeet = hitFeet && hitFeet.typeOfHit === TypeOfHit.BLOCK;
+		const blockedEye = hitEye && hitEye.typeOfHit === TypeOfHit.BLOCK;
+
+		if (blockedCenter && blockedFeet && blockedEye) {
+			attacker.checkData.failedWallAttacks++;
+			console.log(`[Server] Combat: Attack rejected from ${attacker.name} to ${target.name} due to line of sight (blocked by wall)`);
+			if (attacker.checkData.failedWallAttacks >= 3) {
+				console.warn(`[Anti-Cheat] Hitting through walls detected for player ${attacker.name}! (Failed ${attacker.checkData.failedWallAttacks} consecutive wall attacks)`);
+				attacker.client.disconnect("Kill Aura/Wall Hack detected");
+			}
+			return;
+		}
+		attacker.checkData.failedWallAttacks = 0;
+
+		// 4. Creative mode check
 		if (target.gamemode === "creative") {
 			return;
 		}
 
-		// 3. Determine if critical hit (falling, not on ground, not flying)
+		// 5. Determine if critical hit (falling, not on ground, not flying)
 		const isCrit =
 			!attacker.physics.onGround &&
 			attacker.physics.motion.y < 0 &&
 			!attacker.physics.abilities.flying;
 
-		// 4. Calculate damage
+		// 6. Calculate damage
 		let damage = 2; // 1 heart
 		if (isCrit) {
 			damage = 3; // 1.5 hearts
@@ -898,6 +1187,7 @@ export default class GameServer {
 		// Apply damage
 		target.health = Math.max(0, target.health - damage);
 		target.physics.health = target.health;
+		target.checkData.lastHurtTime = now;
 
 		console.log(
 			`[Server] Combat: ${attacker.name} attacked ${target.name} for ${damage} HP (Crit: ${isCrit}). Target Health: ${target.health}/20`,

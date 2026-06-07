@@ -41,6 +41,18 @@ export default class Player {
 			by: number;
 			bz: number;
 		} | null,
+		lastAttackTime: 0,
+		lastHurtTime: 0,
+		lastLegitYaw: 0,
+		wasSnapAttack: false,
+		snapBackYaw: 0,
+		consecutivePerfectHits: 0,
+		rotationHistory: [] as { yaw: number; pitch: number; time: number; attacked: boolean }[],
+		lastAttackedEntityId: null as number | null,
+		lastBlockTime: 0,
+		lastUnblockTime: 0,
+		failedAngleAttacks: 0,
+		failedWallAttacks: 0,
 	};
 	readonly socketId: string;
 

@@ -1376,6 +1376,7 @@ export default class GameServer {
 		player.checkData.predictedNextPos = null;
 		player.checkData.hadInput = false;
 		player.checkData.hadPos = false;
+		player.checkData.inputOrderExempt = 4;
 		player.checkData.teleportTarget = null;
 	}
 }

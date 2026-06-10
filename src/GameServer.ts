@@ -1,4 +1,4 @@
-import { Box3, Vector3 } from "three";
+import { Box3, Vector3, Ray } from "three";
 import { type Socket } from "engine.io";
 import {
 	CPacketBlockUpdate,
@@ -28,6 +28,9 @@ import {
 	SPacketPlayerPosLook,
 	type SPacketPlayerInput,
 	SPacketUseEntity,
+	SPacketPlayerAction,
+	SPacketUseItem,
+	SPacketRespawn,
 	SPacketUpdateInventory,
 	SPacketClickWindow,
 	CPacketUpdateHealth,
@@ -49,7 +52,17 @@ import Rotation from "./rotation.js";
 import {
 	EnumFacing,
 	playerBlockRayTrace,
+	TypeOfHit,
+	rayTraceBlocks,
 } from "./movement/raytrace.js";
+
+
+function getAngleDiff(a: number, b: number): number {
+	let diff = a - b;
+	while (diff < -Math.PI) diff += Math.PI * 2;
+	while (diff > Math.PI) diff -= Math.PI * 2;
+	return Math.abs(diff);
+}
 
 export default class GameServer {
 	private players = new Map<string, Player>();
@@ -139,6 +152,31 @@ export default class GameServer {
 				return this.handleMessage(socket, payload);
 			case "SPacketUseEntity":
 				return this.handleUseEntity(socket, payload);
+			case "SPacketUseItem": {
+				const player = this.getPlayer(socket);
+				if (player) {
+					player.checkData.lastBlockTime = Date.now();
+				}
+				return;
+			}
+			case "SPacketPlayerAction": {
+				const player = this.getPlayer(socket);
+				if (player) {
+					const pl = payload as SPacketPlayerAction;
+					if (pl.action === 5 /* RELEASE_USE_ITEM */) {
+						player.checkData.lastUnblockTime = Date.now();
+						const blockTime = player.checkData.lastBlockTime;
+						const attackTime = player.checkData.lastAttackTime;
+						const now = Date.now();
+						if (blockTime && attackTime && now - blockTime < 15 && now - attackTime < 15 && attackTime >= blockTime) {
+							// Heuristic: log only, no kick. A skilled player could legitimately
+							// block and attack in very close succession.
+							console.log(`[Server] Possible AutoBlock from ${player.name}: Block (${now - blockTime}ms ago) -> Attack (${now - attackTime}ms ago) -> Unblock.`);
+						}
+					}
+				}
+				return;
+			}
 			case "SPacketRespawn":
 				return this.handleRespawn(socket);
 			case "SPacketUpdateInventory":
@@ -358,6 +396,29 @@ export default class GameServer {
 		checkData.hadPos = false;
 		const pl = payload;
 		if (!pl.pos) return;
+		// Push to rotation history
+		const now = Date.now();
+		const attacked = (now - checkData.lastAttackTime < 100);
+		checkData.rotationHistory.push({ yaw, pitch, time: now, attacked });
+		if (checkData.rotationHistory.length > 8) {
+			checkData.rotationHistory.shift();
+		}
+
+		// Rotation history is kept for potential future logging but no kicks are issued.
+		// Heuristic rotation checks (snap-to/snap-back) are unreliable — skilled legit
+		// players can trigger them, and cheaters just tune below the threshold.
+		checkData.wasSnapAttack = false;
+
+		// Smooth camera tracking to identify legit viewing yaw
+		let diffYaw = yaw - player.rotation.yaw;
+		while (diffYaw < -Math.PI) diffYaw += Math.PI * 2;
+		while (diffYaw > Math.PI) diffYaw -= Math.PI * 2;
+		diffYaw = Math.abs(diffYaw);
+
+		if (diffYaw < 0.5) {
+			checkData.lastLegitYaw = yaw;
+		}
+
 		player.rotation.yaw = yaw;
 		player.rotation.pitch = pitch;
 		this.tryCompletePlacement(player);
@@ -464,10 +525,23 @@ export default class GameServer {
 		const player = [...this.players.values()].find((p) => p.client === cl);
 		if (!player) return;
 		const { checkData } = player;
-		player.rotation.set(
-			payload.yaw ?? player.rotation.yaw,
-			payload.pitch ?? player.rotation.pitch,
-		);
+		const yaw = payload.yaw ?? player.rotation.yaw;
+		const pitch = payload.pitch ?? player.rotation.pitch;
+
+		// Push to rotation history
+		const now = Date.now();
+		const attacked = (now - checkData.lastAttackTime < 100);
+		checkData.rotationHistory.push({ yaw, pitch, time: now, attacked });
+		if (checkData.rotationHistory.length > 8) {
+			checkData.rotationHistory.shift();
+		}
+
+		// Rotation history is kept for potential future logging but no kicks are issued.
+		// Heuristic rotation checks (snap-to/snap-back) are unreliable — skilled legit
+		// players can trigger them, and cheaters just tune below the threshold.
+		checkData.wasSnapAttack = false;
+
+		player.rotation.set(yaw, pitch);
 		this.tryCompletePlacement(player);
 		if (checkData.inputOrderExempt > 0) {
 			checkData.inputOrderExempt--;
@@ -539,11 +613,16 @@ export default class GameServer {
 		}
 
 		// #region Validations
+		const eyePos = player.checkData.lastClientPos.clone();
+		eyePos.setY(eyePos.y + player.physics.eyeHeight);
+
+		const dy = (posIn.y ?? 0) - eyePos.y;
+		const reach = Math.sqrt(4.5 * 4.5 + dy * dy);
+
 		const trace = playerBlockRayTrace(
 			{
 				getEyePos() {
-					const lcp = player.checkData.lastClientPos.clone();
-					return lcp.setY(lcp.y + player.physics.eyeHeight);
+					return eyePos;
 				},
 				getLook() {
 					const cosPitch = Math.cos(player.rotation.pitch),
@@ -554,7 +633,7 @@ export default class GameServer {
 				},
 			},
 			world,
-			4.5,
+			reach,
 		);
 		if (trace === null) return cancel("trace === null");
 		const realSide = typeof side === "string"
@@ -615,7 +694,26 @@ export default class GameServer {
 		const y = pkt.location.y ?? 0;
 		const z = pkt.location.z ?? 0;
 
-		if (player) player.physics.world.setBlock(x, y, z, 0);
+		if (player) {
+			const eyePos = player.checkData.lastClientPos.clone();
+			eyePos.setY(eyePos.y + player.physics.eyeHeight);
+
+			const blockCenter = new Vector3(x + 0.5, y + 0.5, z + 0.5);
+			const dy = blockCenter.y - eyePos.y;
+			const maxReach = Math.sqrt(4.5 * 4.5 + dy * dy) + 0.5; // 0.5 block size buffer
+			const dist = eyePos.distanceTo(blockCenter);
+
+			if (dist > maxReach) {
+				console.warn(
+					`[Anti-Cheat] Player ${player.name} tried to break block at (${x}, ${y}, ${z}) beyond reach limit (dist: ${dist.toFixed(2)}, maxReach: ${maxReach.toFixed(2)})`
+				);
+				const blockId = player.physics.world.getBlockId(x, y, z);
+				player.client.send(new CPacketBlockUpdate({ id: blockId, x, y, z }));
+				return;
+			}
+
+			player.physics.world.setBlock(x, y, z, 0);
+		}
 
 		const update = new CPacketBlockUpdate({ id: 0, x, y, z });
 		for (const p of this.players.values()) p.client.send(update);
@@ -863,33 +961,133 @@ export default class GameServer {
 			return;
 		}
 
+		// Self-Attack Check
+		if (pkt.id === attacker.entityId) {
+			console.warn(`[Server] Combat: Attack rejected because ${attacker.name} tried to attack themselves`);
+			return;
+		}
+
+		// Attacker Dead Check
+		if (attacker.health <= 0) {
+			console.log(`[Server] Combat: Attack rejected because attacker ${attacker.name} is dead`);
+			return;
+		}
+
+		// Click Rate Limit check (max 20 clicks/second)
+		const now = Date.now();
+		if (attacker.checkData.lastAttackTime && now - attacker.checkData.lastAttackTime < 50) {
+			console.log(`[Server] Combat: Attack rejected from ${attacker.name} due to click rate limiting`);
+			return;
+		}
+		attacker.checkData.lastAttackTime = now;
+
 		// Find the target player
 		const target = [...this.players.values()].find(
 			(p) => p.entityId === pkt.id,
 		);
 		if (!target) return;
 
-		// 1. Distance check (max 4.5 blocks range)
-		const dist = attacker.physics.pos.distanceTo(target.physics.pos);
-		if (dist > 4.5) {
+		// Multi-target timing is a heuristic — log only, no kick.
+		if (attacker.checkData.lastAttackedEntityId !== null && attacker.checkData.lastAttackedEntityId !== pkt.id) {
+			console.log(`[Server] Combat: ${attacker.name} switched attack target (${attacker.checkData.lastAttackedEntityId} -> ${pkt.id})`);
+		}
+		attacker.checkData.lastAttackedEntityId = pkt.id;
+
+		// Rotation history: mark recent entries as attacked (kept for logging only)
+		const history = attacker.checkData.rotationHistory;
+		for (const entry of history) {
+			if (now - entry.time < 100) entry.attacked = true;
+		}
+
+		// Target hurt invulnerability cooldown (10 ticks / 450ms)
+		if (target.checkData.lastHurtTime && now - target.checkData.lastHurtTime < 450) {
+			console.log(`[Server] Combat: Attack ignored from ${attacker.name} to ${target.name} due to target invulnerability`);
+			return;
+		}
+
+		// 1 & 2. Grim-style combined reach + angle check
+		// Measures actual distance from eye to hitbox surface intercept point.
+		// Tries current and previous-frame look vectors for tick-boundary attacks.
+		// Tight 0.1-block expansion for latency only. Max 3.5 blocks (vanilla 3.0 + 0.5 buffer).
+
+		const MAX_REACH = 3.5;
+		const HITBOX_EXPANSION = 0.1;
+
+		const eyePos = attacker.physics.pos.clone().setY(
+			attacker.physics.pos.y + attacker.physics.eyeHeight,
+		);
+
+		const buildLook = (yaw: number, pitch: number): Vector3 => {
+			const pc = Math.cos(pitch);
+			return new Vector3(
+				-Math.sin(yaw) * pc,
+				Math.sin(pitch),
+				-Math.cos(yaw) * pc,
+			).normalize();
+		};
+
+		const look1 = buildLook(attacker.rotation.yaw, attacker.rotation.pitch);
+		const prevRotEntry = attacker.checkData.rotationHistory.length >= 2
+			? attacker.checkData.rotationHistory[attacker.checkData.rotationHistory.length - 2]
+			: null;
+		const look2 = prevRotEntry
+			? buildLook(prevRotEntry.yaw, attacker.rotation.pitch)
+			: null;
+
+		const expandedBox = target.physics.boundingBox.clone().expandByScalar(HITBOX_EXPANSION);
+		let bestInterceptDist = Infinity;
+		for (const lookVec of look2 ? [look1, look2] : [look1]) {
+			const ray = new Ray(eyePos, lookVec);
+			const hp = new Vector3();
+			if (ray.intersectBox(expandedBox, hp) !== null) {
+				bestInterceptDist = Math.min(bestInterceptDist, eyePos.distanceTo(hp));
+			}
+		}
+
+		if (bestInterceptDist === Infinity) {
 			console.log(
-				`[Server] Combat: Attack rejected from ${attacker.name} to ${target.name} due to distance (${dist.toFixed(2)} blocks)`,
+				`[Server] Combat: Attack rejected from ${attacker.name} → ${target.name} (look ray missed hitbox)`,
 			);
 			return;
 		}
 
-		// 2. Creative mode check
+		if (bestInterceptDist > MAX_REACH) {
+			console.log(
+				`[Server] Combat: Attack rejected from ${attacker.name} → ${target.name} (reach: ${bestInterceptDist.toFixed(3)} > ${MAX_REACH})`,
+			);
+			return;
+		}
+
+		// 3. Line of Sight Raytrace Check (anti-WallHack) — silent mitigation, no kick
+		const targetFeet = target.physics.pos.clone();
+		const targetCenter = target.physics.boundingBox.getCenter(new Vector3());
+		const targetEye = targetFeet.clone().setY(targetFeet.y + target.physics.eyeHeight);
+
+		const hitCenter = rayTraceBlocks(eyePos, targetCenter, false, true, false, attacker.physics.world);
+		const hitFeet = rayTraceBlocks(eyePos, targetFeet, false, true, false, attacker.physics.world);
+		const hitEye = rayTraceBlocks(eyePos, targetEye, false, true, false, attacker.physics.world);
+
+		const blockedCenter = hitCenter && hitCenter.typeOfHit === TypeOfHit.BLOCK;
+		const blockedFeet = hitFeet && hitFeet.typeOfHit === TypeOfHit.BLOCK;
+		const blockedEye = hitEye && hitEye.typeOfHit === TypeOfHit.BLOCK;
+
+		if (blockedCenter && blockedFeet && blockedEye) {
+			console.log(`[Server] Combat: Attack rejected from ${attacker.name} → ${target.name} (blocked by wall — all 3 LOS raycasts failed)`);
+			return;
+		}
+
+		// 4. Creative mode check
 		if (target.gamemode === "creative") {
 			return;
 		}
 
-		// 3. Determine if critical hit (falling, not on ground, not flying)
+		// 5. Determine if critical hit (falling, not on ground, not flying)
 		const isCrit =
 			!attacker.physics.onGround &&
 			attacker.physics.motion.y < 0 &&
 			!attacker.physics.abilities.flying;
 
-		// 4. Calculate damage
+		// 6. Calculate damage
 		let damage = 2; // 1 heart
 		if (isCrit) {
 			damage = 3; // 1.5 hearts
@@ -898,6 +1096,7 @@ export default class GameServer {
 		// Apply damage
 		target.health = Math.max(0, target.health - damage);
 		target.physics.health = target.health;
+		target.checkData.lastHurtTime = now;
 
 		console.log(
 			`[Server] Combat: ${attacker.name} attacked ${target.name} for ${damage} HP (Crit: ${isCrit}). Target Health: ${target.health}/20`,
@@ -1086,6 +1285,7 @@ export default class GameServer {
 		player.checkData.predictedNextPos = null;
 		player.checkData.hadInput = false;
 		player.checkData.hadPos = false;
+		player.checkData.inputOrderExempt = 4;
 		player.checkData.teleportTarget = null;
 	}
 }

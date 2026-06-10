@@ -15,6 +15,7 @@ export interface PhysicsWorld {
 	getCollidingBoundingBoxes(entity: PhysicsPlayer, box: Box3): Box3[];
 	getBlockState(x: BlockPos): BlockState;
 	getBlockState(x: number, y: number, z: number): BlockState;
+	getBlockId(x: number, y: number, z: number): number;
 	isLadder(x: number, y: number, z: number): boolean;
 	isIronLadder(x: number, y: number, z: number): boolean;
 	setBlock(x: number, y: number, z: number, blockId: number): void;

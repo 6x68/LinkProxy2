@@ -169,9 +169,9 @@ export default class GameServer {
 						const attackTime = player.checkData.lastAttackTime;
 						const now = Date.now();
 						if (blockTime && attackTime && now - blockTime < 15 && now - attackTime < 15 && attackTime >= blockTime) {
-							console.warn(`[Anti-Cheat] AutoBlock detected for player ${player.name}! Sequence: Block (${now - blockTime}ms ago) -> Attack (${now - attackTime}ms ago) -> Unblock.`);
-							player.client.disconnect("AutoBlock/Kill Aura detected");
-							return;
+							// Heuristic: log only, no kick. A skilled player could legitimately
+							// block and attack in very close succession.
+							console.log(`[Server] Possible AutoBlock from ${player.name}: Block (${now - blockTime}ms ago) -> Attack (${now - attackTime}ms ago) -> Unblock.`);
 						}
 					}
 				}
@@ -404,46 +404,9 @@ export default class GameServer {
 			checkData.rotationHistory.shift();
 		}
 
-		// Silent Aimbot / Kill Aura rotation spike check
-		const history = checkData.rotationHistory;
-		for (let i = 1; i < history.length - 1; i++) {
-			const current = history[i];
-			if (current && current.attacked) {
-				for (let j = 0; j < i; j++) {
-					const pre = history[j];
-					for (let k = i + 1; k < history.length; k++) {
-						const post = history[k];
-						if (pre && post && post.time - pre.time <= 250) {
-							const snapTo = getAngleDiff(current.yaw, pre.yaw);
-							const snapBack = getAngleDiff(post.yaw, current.yaw);
-							const overallDiff = getAngleDiff(post.yaw, pre.yaw);
-
-							if (snapTo > 0.6 && snapBack > 0.6 && overallDiff < 0.2) {
-								console.warn(
-									`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Rotation spike: ${pre.yaw.toFixed(2)} -> ${current.yaw.toFixed(2)} -> ${post.yaw.toFixed(2)}.`
-								);
-								cl.disconnect("Silent Aimbot/Kill Aura detected");
-								return;
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Check for silent aimbot / snap back
-		if (checkData.wasSnapAttack && now - checkData.lastAttackTime < 100) {
-			let diffBack = yaw - checkData.snapBackYaw;
-			while (diffBack < -Math.PI) diffBack += Math.PI * 2;
-			while (diffBack > Math.PI) diffBack -= Math.PI * 2;
-			diffBack = Math.abs(diffBack);
-
-			if (diffBack < 0.15) {
-				console.warn(`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Snapped back to ${checkData.snapBackYaw.toFixed(2)}.`);
-				cl.disconnect("Silent Aimbot/Kill Aura detected");
-				return;
-			}
-		}
+		// Rotation history is kept for potential future logging but no kicks are issued.
+		// Heuristic rotation checks (snap-to/snap-back) are unreliable — skilled legit
+		// players can trigger them, and cheaters just tune below the threshold.
 		checkData.wasSnapAttack = false;
 
 		// Smooth camera tracking to identify legit viewing yaw
@@ -573,47 +536,9 @@ export default class GameServer {
 			checkData.rotationHistory.shift();
 		}
 
-		// Silent Aimbot / Kill Aura rotation spike check
-		const history = checkData.rotationHistory;
-		for (let i = 1; i < history.length - 1; i++) {
-			const current = history[i];
-			if (current && current.attacked) {
-				for (let j = 0; j < i; j++) {
-					const pre = history[j];
-					for (let k = i + 1; k < history.length; k++) {
-						const post = history[k];
-						if (pre && post && post.time - pre.time <= 250) {
-							const snapTo = getAngleDiff(current.yaw, pre.yaw);
-							const snapBack = getAngleDiff(post.yaw, current.yaw);
-							const overallDiff = getAngleDiff(post.yaw, pre.yaw);
-
-							if (snapTo > 0.6 && snapBack > 0.6 && overallDiff < 0.2) {
-								console.warn(
-									`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Rotation spike: ${pre.yaw.toFixed(2)} -> ${current.yaw.toFixed(2)} -> ${post.yaw.toFixed(2)}.`
-								);
-								cl.disconnect("Silent Aimbot/Kill Aura detected");
-								return;
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Check for silent aimbot / snap back
-		if (checkData.wasSnapAttack && now - checkData.lastAttackTime < 100) {
-			const diffBack = Math.abs(yaw - checkData.snapBackYaw);
-			let normDiff = diffBack;
-			while (normDiff < -Math.PI) normDiff += Math.PI * 2;
-			while (normDiff > Math.PI) normDiff -= Math.PI * 2;
-			normDiff = Math.abs(normDiff);
-
-			if (normDiff < 0.15) {
-				console.warn(`[Anti-Cheat] Silent Aimbot / Kill Aura detected for player ${player.name}! Snapped back to ${checkData.snapBackYaw.toFixed(2)}.`);
-				cl.disconnect("Silent Aimbot/Kill Aura detected");
-				return;
-			}
-		}
+		// Rotation history is kept for potential future logging but no kicks are issued.
+		// Heuristic rotation checks (snap-to/snap-back) are unreliable — skilled legit
+		// players can trigger them, and cheaters just tune below the threshold.
 		checkData.wasSnapAttack = false;
 
 		player.rotation.set(yaw, pitch);
@@ -688,11 +613,16 @@ export default class GameServer {
 		}
 
 		// #region Validations
+		const eyePos = player.checkData.lastClientPos.clone();
+		eyePos.setY(eyePos.y + player.physics.eyeHeight);
+
+		const dy = (posIn.y ?? 0) - eyePos.y;
+		const reach = Math.sqrt(4.5 * 4.5 + dy * dy);
+
 		const trace = playerBlockRayTrace(
 			{
 				getEyePos() {
-					const lcp = player.checkData.lastClientPos.clone();
-					return lcp.setY(lcp.y + player.physics.eyeHeight);
+					return eyePos;
 				},
 				getLook() {
 					const cosPitch = Math.cos(player.rotation.pitch),
@@ -703,7 +633,7 @@ export default class GameServer {
 				},
 			},
 			world,
-			4.5,
+			reach,
 		);
 		if (trace === null) return cancel("trace === null");
 		const realSide = typeof side === "string"
@@ -764,7 +694,26 @@ export default class GameServer {
 		const y = pkt.location.y ?? 0;
 		const z = pkt.location.z ?? 0;
 
-		if (player) player.physics.world.setBlock(x, y, z, 0);
+		if (player) {
+			const eyePos = player.checkData.lastClientPos.clone();
+			eyePos.setY(eyePos.y + player.physics.eyeHeight);
+
+			const blockCenter = new Vector3(x + 0.5, y + 0.5, z + 0.5);
+			const dy = blockCenter.y - eyePos.y;
+			const maxReach = Math.sqrt(4.5 * 4.5 + dy * dy) + 0.5; // 0.5 block size buffer
+			const dist = eyePos.distanceTo(blockCenter);
+
+			if (dist > maxReach) {
+				console.warn(
+					`[Anti-Cheat] Player ${player.name} tried to break block at (${x}, ${y}, ${z}) beyond reach limit (dist: ${dist.toFixed(2)}, maxReach: ${maxReach.toFixed(2)})`
+				);
+				const blockId = player.physics.world.getBlockId(x, y, z);
+				player.client.send(new CPacketBlockUpdate({ id: blockId, x, y, z }));
+				return;
+			}
+
+			player.physics.world.setBlock(x, y, z, 0);
+		}
 
 		const update = new CPacketBlockUpdate({ id: 0, x, y, z });
 		for (const p of this.players.values()) p.client.send(update);
@@ -1038,40 +987,16 @@ export default class GameServer {
 		);
 		if (!target) return;
 
-		// Multi-Target KillAura check
+		// Multi-target timing is a heuristic — log only, no kick.
 		if (attacker.checkData.lastAttackedEntityId !== null && attacker.checkData.lastAttackedEntityId !== pkt.id) {
-			const timeDiff = now - attacker.checkData.lastAttackTime;
-			if (timeDiff < 80) {
-				console.warn(`[Anti-Cheat] Multi-Target KillAura detected for player ${attacker.name}! Attacked different entities (${attacker.checkData.lastAttackedEntityId} and ${pkt.id}) in ${timeDiff}ms.`);
-				attacker.client.disconnect("Multi-Target KillAura detected");
-				return;
-			}
+			console.log(`[Server] Combat: ${attacker.name} switched attack target (${attacker.checkData.lastAttackedEntityId} -> ${pkt.id})`);
 		}
 		attacker.checkData.lastAttackedEntityId = pkt.id;
 
-		// Rotation snapping (Silent Aimbot/Aura check)
+		// Rotation history: mark recent entries as attacked (kept for logging only)
 		const history = attacker.checkData.rotationHistory;
-		// Mark any recent rotation history entries within 100ms as attacked
 		for (const entry of history) {
-			if (now - entry.time < 100) {
-				entry.attacked = true;
-			}
-		}
-
-		if (history.length >= 2) {
-			const prevRot = history[history.length - 2];
-			if (prevRot) {
-				let diffYaw = attacker.rotation.yaw - prevRot.yaw;
-				while (diffYaw < -Math.PI) diffYaw += Math.PI * 2;
-				while (diffYaw > Math.PI) diffYaw -= Math.PI * 2;
-				diffYaw = Math.abs(diffYaw);
-
-				if (diffYaw > 0.8) {
-					// Attacker snapped by > 45 degrees to attack. Flag it and check if they snap back next tick.
-					attacker.checkData.wasSnapAttack = true;
-					attacker.checkData.snapBackYaw = prevRot.yaw;
-				}
-			}
+			if (now - entry.time < 100) entry.attacked = true;
 		}
 
 		// Target hurt invulnerability cooldown (10 ticks / 450ms)
@@ -1080,72 +1005,62 @@ export default class GameServer {
 			return;
 		}
 
-		// 1. Distance check (max 4.5 blocks range)
-		const dist = attacker.physics.pos.distanceTo(target.physics.pos);
-		if (dist > 4.5) {
+		// 1 & 2. Grim-style combined reach + angle check
+		// Measures actual distance from eye to hitbox surface intercept point.
+		// Tries current and previous-frame look vectors for tick-boundary attacks.
+		// Tight 0.1-block expansion for latency only. Max 3.5 blocks (vanilla 3.0 + 0.5 buffer).
+
+		const MAX_REACH = 3.5;
+		const HITBOX_EXPANSION = 0.1;
+
+		const eyePos = attacker.physics.pos.clone().setY(
+			attacker.physics.pos.y + attacker.physics.eyeHeight,
+		);
+
+		const buildLook = (yaw: number, pitch: number): Vector3 => {
+			const pc = Math.cos(pitch);
+			return new Vector3(
+				-Math.sin(yaw) * pc,
+				Math.sin(pitch),
+				-Math.cos(yaw) * pc,
+			).normalize();
+		};
+
+		const look1 = buildLook(attacker.rotation.yaw, attacker.rotation.pitch);
+		const prevRotEntry = attacker.checkData.rotationHistory.length >= 2
+			? attacker.checkData.rotationHistory[attacker.checkData.rotationHistory.length - 2]
+			: null;
+		const look2 = prevRotEntry
+			? buildLook(prevRotEntry.yaw, attacker.rotation.pitch)
+			: null;
+
+		const expandedBox = target.physics.boundingBox.clone().expandByScalar(HITBOX_EXPANSION);
+		let bestInterceptDist = Infinity;
+		for (const lookVec of look2 ? [look1, look2] : [look1]) {
+			const ray = new Ray(eyePos, lookVec);
+			const hp = new Vector3();
+			if (ray.intersectBox(expandedBox, hp) !== null) {
+				bestInterceptDist = Math.min(bestInterceptDist, eyePos.distanceTo(hp));
+			}
+		}
+
+		if (bestInterceptDist === Infinity) {
 			console.log(
-				`[Server] Combat: Attack rejected from ${attacker.name} to ${target.name} due to distance (${dist.toFixed(2)} blocks)`,
+				`[Server] Combat: Attack rejected from ${attacker.name} → ${target.name} (look ray missed hitbox)`,
 			);
 			return;
 		}
 
-		// 2. Look Raycast Check (anti-KillAura/Aimbot)
-		const eyePos = attacker.physics.pos.clone().setY(attacker.physics.pos.y + attacker.physics.eyeHeight);
-		const targetCenter = target.physics.boundingBox.getCenter(new Vector3());
-
-		const pitchCos = Math.cos(attacker.rotation.pitch);
-		const look = new Vector3(
-			-Math.sin(attacker.rotation.yaw) * pitchCos,
-			Math.sin(attacker.rotation.pitch),
-			-Math.cos(attacker.rotation.yaw) * pitchCos
-		).normalize();
-
-		const ray = new Ray(eyePos, look);
-		// Expand the target's bounding box by a scalar tolerance (e.g. 0.4 blocks) to allow for latency/sync lag
-		const expandedBox = target.physics.boundingBox.clone().expandByScalar(0.4);
-		const hitPoint = new Vector3();
-		const rayHit = ray.intersectBox(expandedBox, hitPoint);
-
-		// Lock-on perfect-aimbot tracking detection
-		// Still check mathematical angle difference for perfect center tracking
-		const dx = targetCenter.x - eyePos.x;
-		const dy = targetCenter.y - eyePos.y;
-		const dz = targetCenter.z - eyePos.z;
-		const dh = Math.sqrt(dx * dx + dz * dz);
-		let targetYaw = Math.atan2(-dx, -dz);
-		let targetPitch = -Math.atan2(dy, dh);
-		let diffYaw = attacker.rotation.yaw - targetYaw;
-		while (diffYaw < -Math.PI) diffYaw += Math.PI * 2;
-		while (diffYaw > Math.PI) diffYaw -= Math.PI * 2;
-		let diffPitch = attacker.rotation.pitch - targetPitch;
-		const angleDiff = Math.sqrt(diffYaw * diffYaw + diffPitch * diffPitch);
-
-		if (angleDiff < 0.005) {
-			attacker.checkData.consecutivePerfectHits = (attacker.checkData.consecutivePerfectHits || 0) + 1;
-			if (attacker.checkData.consecutivePerfectHits >= 4) {
-				console.warn(`[Anti-Cheat] Perfect lock-on aimbot tracking detected for player ${attacker.name}!`);
-				attacker.client.disconnect("Aimbot/Kill Aura detected");
-				return;
-			}
-		} else {
-			attacker.checkData.consecutivePerfectHits = 0;
-		}
-
-		if (rayHit === null) {
-			attacker.checkData.failedAngleAttacks++;
+		if (bestInterceptDist > MAX_REACH) {
 			console.log(
-				`[Server] Combat: Attack rejected from ${attacker.name} to ${target.name} due to raycast (look ray missed bounding box)`
+				`[Server] Combat: Attack rejected from ${attacker.name} → ${target.name} (reach: ${bestInterceptDist.toFixed(3)} > ${MAX_REACH})`,
 			);
-			if (attacker.checkData.failedAngleAttacks >= 5) {
-				console.warn(`[Anti-Cheat] Raycast KillAura detected for player ${attacker.name}! (Failed ${attacker.checkData.failedAngleAttacks} consecutive attacks)`);
-				attacker.client.disconnect("Aimbot/Kill Aura detected");
-			}
 			return;
 		}
-		attacker.checkData.failedAngleAttacks = 0;
 
-		// 3. Line of Sight Raytrace Check (anti-WallHack)
+		// 3. Line of Sight Raytrace Check (anti-WallHack) — silent mitigation, no kick
 		const targetFeet = target.physics.pos.clone();
+		const targetCenter = target.physics.boundingBox.getCenter(new Vector3());
 		const targetEye = targetFeet.clone().setY(targetFeet.y + target.physics.eyeHeight);
 
 		const hitCenter = rayTraceBlocks(eyePos, targetCenter, false, true, false, attacker.physics.world);
@@ -1157,15 +1072,9 @@ export default class GameServer {
 		const blockedEye = hitEye && hitEye.typeOfHit === TypeOfHit.BLOCK;
 
 		if (blockedCenter && blockedFeet && blockedEye) {
-			attacker.checkData.failedWallAttacks++;
-			console.log(`[Server] Combat: Attack rejected from ${attacker.name} to ${target.name} due to line of sight (blocked by wall)`);
-			if (attacker.checkData.failedWallAttacks >= 3) {
-				console.warn(`[Anti-Cheat] Hitting through walls detected for player ${attacker.name}! (Failed ${attacker.checkData.failedWallAttacks} consecutive wall attacks)`);
-				attacker.client.disconnect("Kill Aura/Wall Hack detected");
-			}
+			console.log(`[Server] Combat: Attack rejected from ${attacker.name} → ${target.name} (blocked by wall — all 3 LOS raycasts failed)`);
 			return;
 		}
-		attacker.checkData.failedWallAttacks = 0;
 
 		// 4. Creative mode check
 		if (target.gamemode === "creative") {

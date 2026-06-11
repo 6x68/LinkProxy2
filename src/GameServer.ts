@@ -46,10 +46,7 @@ import { createFlatChunk } from "./terrain.js";
 import { simulate } from "./movement/index.js";
 import { PhysicsPlayer } from "./movement/move.js";
 import Rotation from "./rotation.js";
-import {
-	EnumFacing,
-	playerBlockRayTrace,
-} from "./movement/raytrace.js";
+import { EnumFacing, playerBlockRayTrace } from "./movement/raytrace.js";
 
 export default class GameServer {
 	private players = new Map<string, Player>();
@@ -327,7 +324,7 @@ export default class GameServer {
 		const player = [...this.players.values()].find((p) => p.client === cl);
 		if (!player) return;
 		const { checkData } = player;
-		if (!payload.sequenceNumber) {
+		if (payload.sequenceNumber === undefined) {
 			cl.disconnect("No sequence number in packet");
 			return;
 		}
@@ -335,8 +332,8 @@ export default class GameServer {
 			!Number.isNaN(checkData.lastSequenceNumber) &&
 			payload.sequenceNumber <= checkData.lastSequenceNumber
 		) {
-			console.warn(
-				`[Server] Sequence number went backwards or duplicated (client: ${payload.sequenceNumber}, server: ${checkData.lastSequenceNumber}). Resetting tracking.`,
+			cl.disconnect(
+				`Sequence number went backwards or duplicated. Sent: ${payload.sequenceNumber}. Last: ${checkData.lastSequenceNumber}`,
 			);
 		}
 		checkData.lastSequenceNumber = payload.sequenceNumber;
@@ -360,14 +357,13 @@ export default class GameServer {
 		if (!pl.pos) return;
 		player.rotation.yaw = yaw;
 		player.rotation.pitch = pitch;
-		this.tryCompletePlacement(player);
 
 		let reset = false;
 
 		if (checkData.teleportTarget) {
 			const clientPos = new Vector3(pl.pos.x!, pl.pos.y!, pl.pos.z!);
 			const dist = clientPos.distanceTo(checkData.teleportTarget);
-			if (dist > Number.EPSILON) {
+			if (dist > 0.03) {
 				console.warn(
 					`[Server] Teleport check failed: client sent pos (${clientPos.x}, ${clientPos.y}, ${clientPos.z}) but target was (${checkData.teleportTarget.x}, ${checkData.teleportTarget.y}, ${checkData.teleportTarget.z}) (dist: ${dist}). Resetting position.`,
 				);
@@ -468,7 +464,6 @@ export default class GameServer {
 			payload.yaw ?? player.rotation.yaw,
 			payload.pitch ?? player.rotation.pitch,
 		);
-		this.tryCompletePlacement(player);
 		if (checkData.inputOrderExempt > 0) {
 			checkData.inputOrderExempt--;
 		}
@@ -502,40 +497,26 @@ export default class GameServer {
 			[-1, 0, 0], // client WEST  (index 4)
 			[1, 0, 0], // client EAST  (index 5)
 		];
-		const pbFacing = typeof side === "string"
-			? (PBEnumFacing as unknown as Record<string, number>)[side] ?? 0
-			: side;
+		const pbFacing =
+			typeof side === "string"
+				? ((PBEnumFacing as unknown as Record<string, number>)[side] ?? 0)
+				: side;
 		const off = NUM_OFFSET[pbFacing] ?? [0, 0, 0];
 		const bx = (posIn.x ?? 0) + off[0];
 		const by = (posIn.y ?? 0) + off[1];
 		const bz = (posIn.z ?? 0) + off[2];
 
-		player.checkData.pendingPlacement = { payload, bx, by, bz };
-	}
-
-	private tryCompletePlacement(player: Player): void {
-		const pending = player.checkData.pendingPlacement;
-		if (!pending) return;
-		player.checkData.pendingPlacement = null;
-
-		const { payload, bx, by, bz } = pending;
-		const posIn = payload.positionIn;
-		if (!posIn) return;
-		const side = payload.side;
-		if (!side) return;
-
 		const world = player.physics.world;
+		const p = player;
 
 		function cancel(reason?: string) {
 			if (reason)
-				player.client.send(
+				p.client.send(
 					new CPacketMessage({
 						text: `Cancel block placement: ${reason}`,
 					}),
 				);
-			player.client.send(
-				new CPacketBlockUpdate({ id: 0, x: bx, y: by, z: bz }),
-			);
+			p.client.send(new CPacketBlockUpdate({ id: 0, x: bx, y: by, z: bz }));
 		}
 
 		// #region Validations
@@ -557,9 +538,10 @@ export default class GameServer {
 			4.5,
 		);
 		if (trace === null) return cancel("trace === null");
-		const realSide = typeof side === "string"
-			? (PBEnumFacing as unknown as Record<string, number>)[side]
-			: side;
+		const realSide =
+			typeof side === "string"
+				? (PBEnumFacing as unknown as Record<string, number>)[side]
+				: side;
 		if (realSide === undefined) return cancel("undefined side");
 		if (
 			trace.block?.x !== posIn.x ||
@@ -606,6 +588,8 @@ export default class GameServer {
 		const update = new CPacketBlockUpdate({ id: blockId, x: bx, y: by, z: bz });
 		for (const p of this.players.values()) p.client.send(update);
 	}
+
+	private tryCompletePlacement(_player: Player): void {}
 
 	private handleBreak(socket: Socket, payload: SPacketBreakBlock): void {
 		const player = this.getPlayer(socket);

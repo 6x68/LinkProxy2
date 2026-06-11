@@ -54,6 +54,7 @@ export default class GameServer {
 	// note: Miniblox has 2 dimensions (overworld and nether), I'm ignoring the nether since... Why? Whatever.
 	private world = new World();
 	private nextEntityId = 0;
+	private spawn = new Vector3(0, 65, 0);
 
 	addClient(socket: Socket): void {
 		const cl = new Client(socket);
@@ -179,7 +180,7 @@ export default class GameServer {
 			cl,
 			`Player${eid}`,
 			"creative",
-			new Vector3(0, 66, 0),
+			this.spawn,
 			new Rotation(),
 			this.world,
 		);
@@ -520,56 +521,39 @@ export default class GameServer {
 		}
 
 		// #region Validations
-		const possible = [player.rotation, player.lastRotation];
-		function tryValidate(yaw: number, pitch: number): true | string {
-			const trace = playerBlockRayTrace(
-				{
-					getEyePos() {
-						const lcp = player.checkData.lastClientPos.clone();
-						return lcp.setY(lcp.y + player.physics.eyeHeight);
-					},
-					getLook() {
-						const cosPitch = Math.cos(pitch),
-							x = -Math.sin(yaw) * cosPitch,
-							y = Math.sin(pitch),
-							z = -Math.cos(yaw) * cosPitch;
-						return new Vector3(x, y, z).normalize();
-					},
+		const trace = playerBlockRayTrace(
+			{
+				getEyePos() {
+					const lcp = p.checkData.lastClientPos.clone();
+					return lcp.setY(lcp.y + p.physics.eyeHeight);
 				},
-				world,
-				4.5,
-			);
-			if (trace === null) return "trace === null";
-			const realSide =
-				typeof side === "string"
-					? (PBEnumFacing as unknown as Record<string, number>)[side]
-					: side;
-			if (realSide === undefined) return "undefined side";
-			if (!trace.block) return "not hitting a block";
-			if (!posIn) throw "I validate this earlier lol";
-			if (
-				trace.block.x !== posIn.x ||
-				trace.block.y !== posIn.y ||
-				trace.block.z !== posIn.z
-			) {
-				const diff = trace.block.distanceTo(BlockPos.fromProto(posIn));
-				return `traced block pos doesn't match (diff = ${diff})`;
-			}
-			if (trace.side !== realSide)
-				return `traced side (${EnumFacing[trace.side]}) !== client side (${EnumFacing[realSide]})`;
-			return true;
-		}
-		let err: string | undefined = undefined;
-		for (const r of possible) {
-			const result = tryValidate(r.yaw, r.pitch);
-			if (result === true) break;
-			else {
-				err = result;
-			}
-		}
-		if (err) {
-			return cancel(err);
-		}
+				getLook() {
+					const cosPitch = Math.cos(p.rotation.pitch),
+						x = -Math.sin(p.rotation.yaw) * cosPitch,
+						y = Math.sin(p.rotation.pitch),
+						z = -Math.cos(p.rotation.yaw) * cosPitch;
+					return new Vector3(x, y, z).normalize();
+				},
+			},
+			world,
+			4.5,
+		);
+		if (trace === null) return cancel("trace === null");
+		const realSide =
+			typeof side === "string"
+				? (PBEnumFacing as unknown as Record<string, number>)[side]
+				: side;
+		if (realSide === undefined) return cancel("undefined side");
+		const traceOffset = NUM_OFFSET[trace.side] ?? [0, 0, 0];
+		if (
+			!(trace.block?.x === posIn.x && trace.block?.y === posIn.y && trace.block?.z === posIn.z) &&
+			!(
+				posIn.x === (trace.block?.x ?? 0) + traceOffset[0] &&
+				posIn.y === (trace.block?.y ?? 0) + traceOffset[1] &&
+				posIn.z === (trace.block?.z ?? 0) + traceOffset[2]
+			)
+		)
+			return cancel("mismatch");
 		// #endregion
 
 		// Check if the block intersects with any connected player (strict: touching faces is OK)
@@ -577,8 +561,8 @@ export default class GameServer {
 			new Vector3(bx, by, bz),
 			new Vector3(bx + 1, by + 1, bz + 1),
 		);
-		for (const p of this.players.values()) {
-			const bb = p.physics.boundingBox;
+		for (const other of this.players.values()) {
+			const bb = other.physics.boundingBox;
 			if (
 				bb.max.x > blockBox.min.x &&
 				bb.min.x < blockBox.max.x &&
@@ -587,7 +571,7 @@ export default class GameServer {
 				bb.max.z > blockBox.min.z &&
 				bb.min.z < blockBox.max.z
 			) {
-				player.client.send(
+				p.client.send(
 					new CPacketBlockUpdate({ id: 0, x: bx, y: by, z: bz }),
 				);
 				return;
@@ -595,7 +579,7 @@ export default class GameServer {
 		}
 
 		// Get block ID from selected hotbar slot item
-		const heldItem = player.inventory.items[player.heldSlot];
+		const heldItem = p.inventory.items[p.heldSlot];
 		const blockId =
 			heldItem && heldItem.present && heldItem.id !== undefined
 				? heldItem.id
@@ -603,7 +587,7 @@ export default class GameServer {
 
 		world.setBlock(bx, by, bz, blockId);
 		const update = new CPacketBlockUpdate({ id: blockId, x: bx, y: by, z: bz });
-		for (const p of this.players.values()) p.client.send(update);
+		for (const other of this.players.values()) other.client.send(update);
 	}
 
 	private tryCompletePlacement(_player: Player): void {}
@@ -722,7 +706,7 @@ export default class GameServer {
 				if (mode) {
 					player.gamemode = mode;
 					player.physics.abilities.flying = false;
-					this.resetSequenceAndPosition(player);
+					player.resetSequenceAndPosition();
 
 					// Broadcast status update to all players
 					const updateStatus = new CPacketUpdateStatus({
@@ -754,10 +738,12 @@ export default class GameServer {
 					if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
 						player.physics.pos.set(x, y, z);
 						player.checkData.lastAuthoritativePos.set(x, y, z);
-						this.resetSequenceAndPosition(player);
+						player.resetSequenceAndPosition();
 						player.checkData.teleportTarget = player.physics.pos.clone();
-						player.client.send(
-							new CPacketPlayerPosLook({ x, y, z, yaw: 0, pitch: 0 }),
+						player.teleport(
+							new Vector3(x, y, z),
+							player.rotation.yaw,
+							player.rotation.pitch,
 						);
 						player.client.send(
 							new CPacketMessage({
@@ -778,19 +764,7 @@ export default class GameServer {
 					);
 					if (target) {
 						const pos = target.physics.pos;
-						player.physics.pos.copy(pos);
-						player.checkData.lastAuthoritativePos.copy(pos);
-						this.resetSequenceAndPosition(player);
-						player.checkData.teleportTarget = player.physics.pos.clone();
-						player.client.send(
-							new CPacketPlayerPosLook({
-								x: pos.x,
-								y: pos.y,
-								z: pos.z,
-								yaw: 0,
-								pitch: 0,
-							}),
-						);
+						player.teleport(pos, 0, 0);
 						player.client.send(
 							new CPacketMessage({
 								text: `\\green\\Teleported to ${target.name}\\reset\\`,
@@ -811,11 +785,7 @@ export default class GameServer {
 					);
 				}
 			} else if (command === "spawn") {
-				this.resetSequenceAndPosition(player);
-				player.checkData.teleportTarget = player.physics.pos.clone();
-				player.client.send(
-					new CPacketPlayerPosLook({ x: 0, y: 70, z: 0, yaw: 0, pitch: 0 }),
-				);
+				player.teleport(this.spawn, 0, 0);
 				player.client.send(
 					new CPacketMessage({ text: `\\green\\Teleported to spawn\\reset\\` }),
 				);
@@ -1032,9 +1002,7 @@ export default class GameServer {
 		player.physics.health = 20;
 
 		// Reset coordinates to spawn point
-		player.physics.pos.set(0, 70, 0);
-		player.checkData.lastAuthoritativePos.set(0, 70, 0);
-		this.resetSequenceAndPosition(player);
+		player.teleport(this.spawn, 0, 0);
 		player.checkData.teleportTarget = player.physics.pos.clone();
 
 		// Send respawn confirmation to close the death screen
@@ -1045,18 +1013,6 @@ export default class GameServer {
 				dimension: 0,
 			}),
 		);
-
-		// Position player at spawn and sync health
-		player.client.send(
-			new CPacketPlayerPosLook({
-				x: 0,
-				y: 70,
-				z: 0,
-				yaw: 0,
-				pitch: 0,
-			}),
-		);
-
 		player.client.send(
 			new CPacketUpdateHealth({
 				id: player.entityId,
@@ -1080,13 +1036,5 @@ export default class GameServer {
 				p.client.send(spawnPkt);
 			}
 		}
-	}
-
-	private resetSequenceAndPosition(player: Player): void {
-		player.checkData.lastSequenceNumber = NaN;
-		player.checkData.predictedNextPos = null;
-		player.checkData.hadInput = false;
-		player.checkData.hadPos = false;
-		player.checkData.teleportTarget = null;
 	}
 }

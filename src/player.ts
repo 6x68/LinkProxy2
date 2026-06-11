@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import { Vector3 } from "three";
 import type Client from "./client.js";
-import type { SPacketPlaceBlock } from "../gen/protocol2_pb.js";
+import {
+	CPacketPlayerPosLook,
+	type SPacketPlaceBlock,
+} from "../gen/protocol2_pb.js";
 import { PhysicsPlayer } from "./movement/move.js";
 import { World } from "./movement/world.js";
 import Inventory from "./inventory.js";
@@ -58,6 +61,32 @@ export default class Player {
 		} | null,
 	};
 	readonly socketId: string;
+
+	resetSequenceAndPosition(): void {
+		this.checkData.lastSequenceNumber = NaN;
+		this.checkData.predictedNextPos = null;
+		this.checkData.hadInput = false;
+		this.checkData.hadPos = false;
+		this.checkData.teleportTarget = null;
+	}
+
+	teleport(vec: Vector3, yaw: number, pitch: number) {
+		this.resetSequenceAndPosition();
+		const { x, y, z } = vec;
+		this.checkData.teleportTarget = vec.clone();
+		this.checkData.lastAuthoritativePos.copy(vec);
+		this.setRotation(yaw, pitch);
+		this.client.send(
+			new CPacketPlayerPosLook({
+				yaw,
+				pitch,
+				x,
+				y,
+				z,
+			}),
+		);
+		this.checkData.inputOrderExempt = 1; // the player will send a Pos packet first
+	}
 
 	constructor(
 		public readonly client: Client,

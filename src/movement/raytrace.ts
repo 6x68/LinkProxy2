@@ -155,7 +155,10 @@ export function rayTraceBlocks(
 		) {
 			if (block.canCollideCheck(state, stopOnLiquid)) {
 				const hit = block.collisionRayTrace(world, currentPos, start, end);
-				if (hit != null) return hit;
+				if (hit != null) {
+					hit.side = facing;
+					return hit;
+				}
 			} else {
 				lastMiss = new RayTraceResult(
 					TypeOfHit.MISS,

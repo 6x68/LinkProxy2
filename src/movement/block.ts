@@ -1,5 +1,5 @@
 import { Box3, Vector3 } from "three";
-import type BlockPos from "./BlockPos.js";
+import BlockPos from "./BlockPos.js";
 import type { Material } from "./materials/material.js";
 import type { PhysicsPlayer, PhysicsWorld } from "./move.js";
 import { EnumFacing, RayTraceResult, TypeOfHit } from "./raytrace.js";
@@ -41,6 +41,57 @@ function getIntermediateWithZValue(
 	return t >= 0 && t <= 1
 		? new Vector3(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t, start.z + dz * t)
 		: null;
+}
+
+function isVecInYZ(box: Box3, vec: Vector3 | null): vec is Vector3 {
+	return vec != null && vec.y >= box.min.y && vec.y <= box.max.y && vec.z >= box.min.z && vec.z <= box.max.z;
+}
+
+function isVecInXZ(box: Box3, vec: Vector3 | null): vec is Vector3 {
+	return vec != null && vec.x >= box.min.x && vec.x <= box.max.x && vec.z >= box.min.z && vec.z <= box.max.z;
+}
+
+function isVecInXY(box: Box3, vec: Vector3 | null): vec is Vector3 {
+	return vec != null && vec.x >= box.min.x && vec.x <= box.max.x && vec.y >= box.min.y && vec.y <= box.max.y;
+}
+
+export function calculateIntercept(
+	box: Box3,
+	start: Vector3,
+	end: Vector3,
+): RayTraceResult | null {
+	let p = getIntermediateWithXValue(start, end, box.min.x);
+	let g = getIntermediateWithXValue(start, end, box.max.x);
+	let y = getIntermediateWithYValue(start, end, box.min.y);
+	let x = getIntermediateWithYValue(start, end, box.max.y);
+	let S = getIntermediateWithZValue(start, end, box.min.z);
+	let b = getIntermediateWithZValue(start, end, box.max.z);
+
+	if (!isVecInYZ(box, p)) p = null;
+	if (!isVecInYZ(box, g)) g = null;
+	if (!isVecInXZ(box, y)) y = null;
+	if (!isVecInXZ(box, x)) x = null;
+	if (!isVecInXY(box, S)) S = null;
+	if (!isVecInXY(box, b)) b = null;
+
+	let v: Vector3 | null = null;
+	if (p != null) v = p;
+	if (g != null && (v == null || start.distanceToSquared(g) < start.distanceToSquared(v))) v = g;
+	if (y != null && (v == null || start.distanceToSquared(y) < start.distanceToSquared(v))) v = y;
+	if (x != null && (v == null || start.distanceToSquared(x) < start.distanceToSquared(v))) v = x;
+	if (S != null && (v == null || start.distanceToSquared(S) < start.distanceToSquared(v))) v = S;
+	if (b != null && (v == null || start.distanceToSquared(b) < start.distanceToSquared(v))) v = b;
+	if (v == null) return null;
+
+	let side: EnumFacing;
+	if (p && v.equals(p)) side = EnumFacing.WEST;
+	else if (g && v.equals(g)) side = EnumFacing.EAST;
+	else if (y && v.equals(y)) side = EnumFacing.DOWN;
+	else if (x && v.equals(x)) side = EnumFacing.UP;
+	else if (S && v.equals(S)) side = EnumFacing.NORTH;
+	else side = EnumFacing.SOUTH;
+
+	return new RayTraceResult(TypeOfHit.BLOCK, v, BlockPos.ORIGIN, side, null);
 }
 
 export default class Block {
